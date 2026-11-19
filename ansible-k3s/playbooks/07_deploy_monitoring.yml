@@ -1,0 +1,429 @@
+---
+# Stage 7: Monitoring stack (Prometheus, Grafana, Alertmanager, node-exporter, kube-state-metrics)
+#   Play 1 - Expose etcd metrics on every K3s server (rolling restart, one server at a time)
+#   Play 2 - Download the kube-prometheus-stack chart and work out which images it needs
+#   Play 3 - Pre-pull those images on the nodes (slow networks would otherwise time out helm --wait)
+#   Play 4 - Install CRDs + chart, Traefik ServiceMonitor, Grafana HTTPRoute, then verify targets
+
+- name: Expose embedded etcd metrics on K3s HA servers (rolling, one server at a time)
+  hosts: k3s_servers
+  become: true
+  serial: 1
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Enable etcd-expose-metrics in {{ k3s_config_file }}
+      ansible.builtin.blockinfile:
+        path: "{{ k3s_config_file }}"
+        create: true
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - etcd metrics (playbook 07)"
+        block: |
+          etcd-expose-metrics: true
+      register: k3s_etcd_metrics_config
+
+    # Every k3s subcommand (including "kubectl" for non-root users) reads this file,
+    # so it must stay world-readable. Kept separate so a permission fix never restarts k3s.
+    - name: Ensure {{ k3s_config_file }} is readable by k3s CLI users
+      ansible.builtin.file:
+        path: "{{ k3s_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart K3s server on {{ inventory_hostname }} to apply etcd metrics setting
+      ansible.builtin.systemd:
+        name: "{{ k3s_server_service_name }}"
+        state: restarted
+      when: k3s_etcd_metrics_config.changed
+
+    - name: Wait for etcd metrics port {{ k3s_etcd_metrics_port }} on {{ ansible_host }}
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ k3s_etcd_metrics_port }}"
+        state: started
+        timeout: 180
+
+    - name: Wait until {{ inventory_hostname }} reports Ready
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: server_node_ready
+      until: server_node_ready.rc == 0 and server_node_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # Do not restart the next server until etcd is healthy again, so quorum (2/3) is never lost
+    - name: Wait until etcd on {{ inventory_hostname }} is healthy
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw /readyz/etcd"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: server_etcd_ready
+      until: server_etcd_ready.rc == 0 and server_etcd_ready.stdout == "ok"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+- name: Download kube-prometheus-stack chart and resolve required images
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  vars:
+    monitoring_work_dir: "/home/{{ ansible_user }}/monitoring"
+    monitoring_chart_dir: "{{ monitoring_work_dir }}/{{ monitoring_chart_name }}"
+
+  tasks:
+    - name: Check that Helm is installed (playbook 06 installs it)
+      ansible.builtin.command:
+        cmd: "{{ helm_bin_path }} version --short"
+      changed_when: false
+
+    - name: Validate monitoring node {{ monitoring_node }} exists in the cluster
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get node {{ monitoring_node }} -o name"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      changed_when: false
+
+    - name: Reset monitoring work directory
+      ansible.builtin.file:
+        path: "{{ monitoring_work_dir }}"
+        state: "{{ item }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+      loop:
+        - absent
+        - directory
+
+    - name: Download {{ monitoring_chart_name }} {{ monitoring_chart_version }}
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} pull {{ monitoring_chart_name }}
+          --repo {{ monitoring_chart_repo }}
+          --version {{ monitoring_chart_version }}
+          --untar --untardir {{ monitoring_work_dir }}
+      register: monitoring_chart_pull
+      retries: 3
+      delay: 10
+      until: monitoring_chart_pull.rc == 0
+      changed_when: true
+
+    - name: Copy monitoring values and manifests to {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../{{ item.src }}"
+        dest: "{{ monitoring_work_dir }}/{{ item.dest }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+      loop:
+        - { src: "{{ monitoring_values_file }}", dest: "values.yaml" }
+        - { src: "{{ monitoring_manifests_dir }}/", dest: "manifests/" }
+
+    # Cluster-specific values that cannot live in the shared values file
+    - name: Generate cluster-specific monitoring overrides
+      ansible.builtin.copy:
+        dest: "{{ monitoring_work_dir }}/overrides.yaml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        content: "{{ overrides | to_nice_yaml(indent=2) }}"
+      vars:
+        node_selector:
+          kubernetes.io/hostname: "{{ monitoring_node }}"
+        overrides:
+          kubeEtcd:
+            endpoints: "{{ groups['k3s_servers'] | map('extract', hostvars, 'ansible_host') | list }}"
+          prometheus:
+            prometheusSpec:
+              nodeSelector: "{{ node_selector }}"
+          alertmanager:
+            alertmanagerSpec:
+              nodeSelector: "{{ node_selector }}"
+          grafana:
+            nodeSelector: "{{ node_selector }}"
+          kube-state-metrics:
+            nodeSelector: "{{ node_selector }}"
+          prometheusOperator:
+            nodeSelector: "{{ node_selector }}"
+            admissionWebhooks:
+              patch:
+                nodeSelector: "{{ node_selector }}"
+
+    - name: Render chart to list the images it uses
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} template {{ monitoring_release_name }} {{ monitoring_chart_dir }}
+          --namespace {{ monitoring_namespace }}
+          --skip-tests
+          -f {{ monitoring_work_dir }}/values.yaml
+          -f {{ monitoring_work_dir }}/overrides.yaml
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: monitoring_rendered
+      changed_when: false
+
+    - name: Render node-exporter DaemonSet to find the image needed on every node
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} template {{ monitoring_release_name }} {{ monitoring_chart_dir }}
+          --namespace {{ monitoring_namespace }}
+          -f {{ monitoring_work_dir }}/values.yaml
+          -s charts/prometheus-node-exporter/templates/daemonset.yaml
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: node_exporter_rendered
+      changed_when: false
+
+    # The config-reloader image is passed as an operator argument, not as an "image:" field
+    - name: Resolve image lists for pre-pulling
+      ansible.builtin.set_fact:
+        monitoring_all_images: >-
+          {{ ((monitoring_rendered.stdout | regex_findall('image:\s*"?([^"\s]+)'))
+              + (monitoring_rendered.stdout | regex_findall('prometheus-config-reloader=([^"\s]+)')))
+             | unique | sort }}
+        monitoring_daemonset_images: >-
+          {{ node_exporter_rendered.stdout | regex_findall('image:\s*"?([^"\s]+)') | unique }}
+
+    - name: Show images required by the monitoring stack
+      ansible.builtin.debug:
+        msg:
+          every_node: "{{ monitoring_daemonset_images }}"
+          monitoring_node_only: "{{ monitoring_all_images | difference(monitoring_daemonset_images) }}"
+
+- name: Pre-pull monitoring images on cluster nodes
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  vars:
+    images_to_pull: >-
+      {{ hostvars['k3s-1'].monitoring_all_images
+         if inventory_hostname == monitoring_node
+         else hostvars['k3s-1'].monitoring_daemonset_images }}
+
+  tasks:
+    - name: Check which images are already present on {{ inventory_hostname }}
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl inspecti {{ item }}"
+      loop: "{{ images_to_pull }}"
+      register: image_present
+      changed_when: false
+      failed_when: false
+
+    - name: Pull missing images on {{ inventory_hostname }} (can take a long time on slow networks)
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl pull {{ item.item }}"
+      loop: "{{ image_present.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc != 0
+      register: image_pull
+      retries: 3
+      delay: 15
+      until: image_pull.rc == 0
+
+- name: Deploy kube-prometheus-stack on K3s control plane
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  vars:
+    monitoring_work_dir: "/home/{{ ansible_user }}/monitoring"
+    monitoring_chart_dir: "{{ monitoring_work_dir }}/{{ monitoring_chart_name }}"
+    prometheus_api: "/api/v1/namespaces/{{ monitoring_namespace }}/services/http:{{ monitoring_release_name }}-prometheus:9090/proxy/api/v1"
+
+  tasks:
+    - name: Validate Grafana admin password is loaded from Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - vault_grafana_admin_password is defined
+          - (vault_grafana_admin_password | length) > 0
+        fail_msg: "vault_grafana_admin_password must be set in vars/vault.yml (see vars/vault.yml.example)."
+      no_log: true
+
+    - name: Ensure namespace {{ monitoring_namespace }} exists
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create namespace {{ monitoring_namespace }} --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: monitoring_ns_apply
+      changed_when: "'created' in monitoring_ns_apply.stdout or 'configured' in monitoring_ns_apply.stdout"
+
+    - name: Ensure {{ monitoring_grafana_admin_secret }} secret exists from Ansible Vault
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create secret generic {{ monitoring_grafana_admin_secret }} \
+            --namespace {{ monitoring_namespace }} \
+            --from-literal=admin-user=admin \
+            --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+            --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+        GRAFANA_ADMIN_PASSWORD: "{{ vault_grafana_admin_password }}"
+      register: grafana_secret_apply
+      changed_when: "'created' in grafana_secret_apply.stdout or 'configured' in grafana_secret_apply.stdout"
+      no_log: true
+
+    - name: Wait until the Kubernetes API server is ready
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw /readyz"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: apiserver_ready
+      until: apiserver_ready.rc == 0 and apiserver_ready.stdout == "ok"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # helm upgrade never upgrades CRDs, so apply them explicitly (also covers chart version bumps)
+    - name: Apply Prometheus Operator CRDs (server-side)
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl apply --server-side --force-conflicts
+          -f {{ monitoring_chart_dir }}/charts/crds/crds/
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: monitoring_crd_apply
+      retries: 3
+      delay: 20
+      until: monitoring_crd_apply.rc == 0
+      changed_when: "'serverside-applied' in monitoring_crd_apply.stdout"
+
+    # Creating 100+ objects at once can make etcd slow enough for k3s to lose leader election
+    # and restart (API briefly unavailable). --atomic rolls a failed attempt back so the retry
+    # starts clean instead of hitting a release stuck in "failed".
+    - name: Deploy or upgrade {{ monitoring_chart_name }} {{ monitoring_chart_version }} using Helm
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} upgrade --install {{ monitoring_release_name }} {{ monitoring_chart_dir }}
+          --namespace {{ monitoring_namespace }}
+          --skip-crds
+          -f {{ monitoring_work_dir }}/values.yaml
+          -f {{ monitoring_work_dir }}/overrides.yaml
+          --atomic
+          --wait
+          --timeout {{ monitoring_helm_timeout }}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: monitoring_deploy_result
+      retries: 2
+      delay: 60
+      until: monitoring_deploy_result.rc == 0
+      changed_when: "'has been upgraded' in monitoring_deploy_result.stdout or 'has been installed' in monitoring_deploy_result.stdout"
+
+    - name: Apply Traefik ServiceMonitor and Grafana HTTPRoute
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl apply -f {{ monitoring_work_dir }}/manifests/"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: monitoring_manifests_apply
+      changed_when: "'created' in monitoring_manifests_apply.stdout or 'configured' in monitoring_manifests_apply.stdout"
+
+    # ------------------------------------------------------------------ Verify
+
+    - name: Wait until node-exporter runs on every node
+      ansible.builtin.command:
+        cmd: >-
+          {{ k3s_binary_path }} kubectl get daemonset {{ monitoring_release_name }}-prometheus-node-exporter
+          -n {{ monitoring_namespace }} -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}'
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: node_exporter_ready
+      until: >-
+        node_exporter_ready.rc == 0 and
+        (node_exporter_ready.stdout.split('/') | first) == (groups['k3s_cluster'] | length | string)
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Wait until Prometheus is ready
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw /api/v1/namespaces/{{ monitoring_namespace }}/services/http:{{ monitoring_release_name }}-prometheus:9090/proxy/-/ready"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: prometheus_ready
+      until: prometheus_ready.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # Every target is scraped at least once within ~1 scrape interval (30s)
+    - name: Wait until every scrape target has been scraped at least once
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw '{{ prometheus_api }}/targets?state=active'"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: prometheus_targets
+      until: >-
+        prometheus_targets.rc == 0 and
+        (prometheus_targets.stdout | from_json).data.activeTargets | length > 0 and
+        (prometheus_targets.stdout | from_json).data.activeTargets
+          | selectattr('health', 'equalto', 'unknown') | list | length == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Summarize scrape targets by job
+      ansible.builtin.set_fact:
+        targets_up: >-
+          {{ dict(up_by_job | map('first') | zip(up_by_job | map('last') | map('length'))) }}
+        targets_down: >-
+          {{ (prometheus_targets.stdout | from_json).data.activeTargets
+             | rejectattr('health', 'equalto', 'up')
+             | map(attribute='scrapeUrl') | list }}
+      vars:
+        up_by_job: >-
+          {{ (prometheus_targets.stdout | from_json).data.activeTargets
+             | selectattr('health', 'equalto', 'up') | groupby('labels.job') }}
+
+    - name: Show scrape target health
+      ansible.builtin.debug:
+        msg:
+          up_by_job: "{{ targets_up }}"
+          down: "{{ targets_down }}"
+
+    - name: Warn about scrape targets that are down
+      ansible.builtin.debug:
+        msg: "WARNING: {{ targets_down | length }} target(s) are down - check Prometheus > Status > Targets."
+      when: targets_down | length > 0
+
+    - name: Read Grafana hostname from its HTTPRoute
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get httproute grafana -n {{ monitoring_namespace }} -o jsonpath='{.spec.hostnames[0]}'"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: grafana_hostname
+      changed_when: false
+
+    - name: Show how to access Grafana
+      ansible.builtin.debug:
+        msg:
+          - "Grafana: http://{{ grafana_hostname.stdout }} (add '{{ ansible_host }} {{ grafana_hostname.stdout }}' to /etc/hosts)"
+          - "User: admin, password: vault_grafana_admin_password (secret {{ monitoring_namespace }}/{{ monitoring_grafana_admin_secret }})"
+          - "Prometheus UI: kubectl -n {{ monitoring_namespace }} port-forward svc/{{ monitoring_release_name }}-prometheus 9090"

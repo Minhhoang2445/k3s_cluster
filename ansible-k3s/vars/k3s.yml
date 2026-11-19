@@ -65,3 +65,20 @@ pms_postgres_secret_name: "postgres-secret"
 pms_postgres_db: "PMS"
 pms_postgres_service: "postgres-service"
 pms_postgres_port: 5432
+
+# Monitoring (kube-prometheus-stack, installed by playbook 07)
+monitoring_namespace: "monitoring"
+monitoring_release_name: "monitoring"
+monitoring_chart_repo: "https://prometheus-community.github.io/helm-charts"
+monitoring_chart_name: "kube-prometheus-stack"
+monitoring_chart_version: "93.4.1"
+monitoring_values_file: "helm-chart/monitoring/values.yaml"
+monitoring_manifests_dir: "helm-chart/monitoring/manifests"
+# Prometheus, Grafana, Alertmanager, Operator and kube-state-metrics run on this node
+# so control-plane nodes keep their resources for etcd, Traefik and the database.
+monitoring_node: "{{ groups['k3s_workers'][0] }}"
+monitoring_grafana_admin_secret: "grafana-admin"
+monitoring_helm_timeout: "20m"
+# K3s server config file used to enable etcd metrics (merged with CLI flags)
+k3s_config_file: "/etc/rancher/k3s/config.yaml"
+k3s_etcd_metrics_port: 2381

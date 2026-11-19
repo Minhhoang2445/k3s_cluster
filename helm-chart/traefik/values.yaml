@@ -1,6 +1,5 @@
 
-
-# One replica per control-plane node (playbook 06 overrides this with the server count)
+# One replica per control-plane node 
 deployment:
   replicas: 3
 
@@ -66,3 +65,11 @@ gatewayClass:
 # Exposed on ports 80/443 of every node by K3s ServiceLB
 service:
   type: LoadBalancer
+
+# Expose Prometheus metrics via the "traefik-metrics" Service (port 9100).
+# The ServiceMonitor lives in helm-chart/monitoring/manifests (playbook 07), because
+# its CRD does not exist yet when playbook 06 installs Traefik.
+metrics:
+  prometheus:
+    service:
+      enabled: true

@@ -17,3 +17,6 @@
 
 # Stage 6: Deploy PMS application using Helm
 - import_playbook: playbooks/06_deploy_helm.yml
+
+# Stage 7: Deploy monitoring (Prometheus, Grafana, Alertmanager) and expose etcd metrics
+- import_playbook: playbooks/07_deploy_monitoring.yml

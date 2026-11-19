@@ -13,3 +13,6 @@ vault_jwt_access_token_secret: "CHANGE_ME_JWT_ACCESS_TOKEN_SECRET"
 # PostgreSQL credentials (used for postgres-secret and the backend DATABASE_URL)
 vault_postgres_user: "CHANGE_ME_POSTGRES_USER"
 vault_postgres_password: "CHANGE_ME_POSTGRES_PASSWORD"
+
+# Grafana admin password (stored in the grafana-admin secret by playbook 07)
+vault_grafana_admin_password: "CHANGE_ME_GRAFANA_ADMIN_PASSWORD"
