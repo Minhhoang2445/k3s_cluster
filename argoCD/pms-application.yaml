@@ -9,7 +9,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/Minhhoang2445/ProjectManagementSystem.git
+    repoURL: https://github.com/Minhhoang2445/k3s_cluster.git
     targetRevision: main
     path: helm-chart/pms
     helm:
