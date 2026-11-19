@@ -12,6 +12,19 @@ spec:
   hostnames:
     - grafana.pms.local
   rules:
-    - backendRefs:
+    # The pms route sends PathPrefix /api (any host) to the PMS backend. Grafana's UI also
+    # calls /api/*, so match it explicitly here: Host + /api outranks the host-less /api rule.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: monitoring-grafana
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
         - name: monitoring-grafana
           port: 80
