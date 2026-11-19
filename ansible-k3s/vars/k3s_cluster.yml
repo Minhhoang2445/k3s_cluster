@@ -1,0 +1,26 @@
+---
+# Stage 1 Bootstrap Server (Initial embedded etcd member)
+k3s_bootstrap_host: "k3s-1"
+k3s_bootstrap_ip: "192.168.64.6"
+
+# K3s API Endpoint
+# In the initial lab, this points to the bootstrap server IP (192.168.64.6).
+# To transition to a stable Virtual IP (e.g., kube-vip/keepalived) or Load Balancer later,
+# update k3s_api_endpoint to the VIP/LB address without changing playbook logic.
+k3s_api_endpoint: "192.168.64.6"
+k3s_api_port: 6443
+
+# TLS Subject Alternative Names (SANs) embedded in the K3s API Server certificate
+# Includes the API endpoint, all 3 HA control-plane server IPs, and server hostnames.
+k3s_tls_san:
+  - "{{ k3s_api_endpoint }}"
+  - "192.168.64.6"
+  - "192.168.64.7"
+  - "192.168.64.8"
+  - "k3s-1"
+  - "k3s-2"
+  - "k3s-3"
+
+# Cluster Network CIDRs
+pod_network_cidr: "10.42.0.0/16"
+service_cidr: "10.43.0.0/16"

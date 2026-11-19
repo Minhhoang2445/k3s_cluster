@@ -1,0 +1,21 @@
+---
+# Server-specific configuration for K3s HA control-plane nodes (k3s_servers)
+k3s_server_service_name: "k3s"
+k3s_server_service_file: "/etc/systemd/system/k3s.service"
+k3s_server_uninstall_script: "/usr/local/bin/k3s-uninstall.sh"
+k3s_kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+k3s_write_kubeconfig_mode: "0644"
+k3s_node_token_path: "/var/lib/rancher/k3s/server/node-token"
+k3s_etcd_db_dir: "/var/lib/rancher/k3s/server/db/etcd"
+k3s_sqlite_db_path: "/var/lib/rancher/k3s/server/db/state.db"
+k3s_etcd_tls_dir: "/var/lib/rancher/k3s/server/tls/etcd"
+k3s_manifests_dir: "/var/lib/rancher/k3s/server/manifests"
+
+# Embedded etcd ports & control-plane required ports
+k3s_server_required_tcp_ports:
+  - 6443
+  - 2379
+  - 2380
+  - 10250
+k3s_server_required_udp_ports:
+  - 8472

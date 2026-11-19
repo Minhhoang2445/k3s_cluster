@@ -1,0 +1,118 @@
+---
+# Retrieve shared K3s token from initial bootstrap server (k3s-1) if not already cached in facts
+- name: Retrieve K3s cluster token from bootstrap server for worker registration
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Read K3s node token from bootstrap server
+      ansible.builtin.slurp:
+        src: "{{ k3s_node_token_path }}"
+      register: k3s_token_slurp
+      no_log: true
+      when: k3s_node_token is not defined
+
+    - name: Store K3s token as protected host fact
+      ansible.builtin.set_fact:
+        k3s_node_token: "{{ k3s_token_slurp.content | b64decode | trim }}"
+      no_log: true
+      when: k3s_node_token is not defined
+
+    - name: Validate K3s token is available for worker join
+      ansible.builtin.assert:
+        that:
+          - k3s_node_token is defined
+          - (k3s_node_token | length) > 10
+        fail_msg: "Failed to retrieve valid K3s token from {{ inventory_hostname }}."
+      no_log: true
+
+
+# Join the two worker nodes (worker1, worker2) as K3s agents
+- name: Join worker nodes to K3s cluster as agents
+  hosts: k3s_workers
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Verify worker node CPU architecture is supported
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] in k3s_supported_architectures
+        fail_msg: "Unsupported architecture {{ ansible_facts['architecture'] }} on worker {{ inventory_hostname }}"
+
+    - name: Ensure K3s server service is not installed on worker node
+      ansible.builtin.stat:
+        path: "{{ k3s_server_service_file }}"
+      register: worker_server_unit
+
+    - name: Fail safely if worker node has a K3s server service installed
+      ansible.builtin.assert:
+        that:
+          - not worker_server_unit.stat.exists
+        fail_msg: >-
+          Worker node {{ inventory_hostname }} has {{ k3s_server_service_file }} installed.
+          Workers must run k3s-agent only. Refusing to modify node automatically.
+
+    - name: Check if k3s-agent systemd service file exists on worker
+      ansible.builtin.stat:
+        path: "{{ k3s_agent_service_file }}"
+      register: k3s_agent_service
+
+    - name: Check if worker kubelet kubeconfig exists (indicates completed registration)
+      ansible.builtin.stat:
+        path: "{{ k3s_agent_kubeconfig_path }}"
+      register: k3s_agent_kubeconfig
+
+    - name: Verify TCP connectivity from worker to K3s API endpoint {{ k3s_api_endpoint }}:{{ k3s_api_port }}
+      ansible.builtin.wait_for:
+        host: "{{ k3s_api_endpoint }}"
+        port: "{{ k3s_api_port }}"
+        state: started
+        timeout: 30
+
+    - name: Join worker to K3s cluster as agent
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_install_script_path }} agent
+          --node-ip={{ ansible_host }}
+      environment:
+        K3S_URL: "https://{{ k3s_api_endpoint }}:{{ k3s_api_port }}"
+        K3S_TOKEN: "{{ hostvars[k3s_bootstrap_host].k3s_node_token }}"
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+      no_log: true
+      when: not (k3s_agent_service.stat.exists and k3s_agent_kubeconfig.stat.exists)
+
+    - name: Ensure k3s-agent systemd service is enabled and running on worker
+      ansible.builtin.systemd:
+        name: "{{ k3s_agent_service_name }}"
+        enabled: true
+        state: started
+      register: k3s_agent_systemd
+
+    - name: Verify k3s-agent systemd service is actively running
+      ansible.builtin.assert:
+        that:
+          - k3s_agent_systemd.status.ActiveState == "active"
+        fail_msg: "k3s-agent service is not active on worker {{ inventory_hostname }}."
+
+    - name: Wait until worker node {{ inventory_hostname }} is registered and Ready in the cluster
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      delegate_to: "{{ k3s_bootstrap_host }}"
+      register: worker_node_ready
+      until: worker_node_ready.rc == 0 and worker_node_ready.stdout == "True"
+      retries: 30
+      delay: 5
+      changed_when: false

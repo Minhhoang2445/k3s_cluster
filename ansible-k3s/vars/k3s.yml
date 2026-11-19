@@ -1,0 +1,67 @@
+---
+# Common K3s and tooling versions (pinned for reproducibility across servers and workers)
+k3s_version: "v1.31.2+k3s1"
+k3s_install_script_url: "https://get.k3s.io"
+k3s_install_script_path: "/usr/local/bin/k3s-install.sh"
+k3s_binary_path: "/usr/local/bin/k3s"
+
+# Architecture support
+k3s_supported_architectures:
+  - "aarch64"
+  - "x86_64"
+
+# Raspberry Pi boot configuration
+rpi_cmdline_path: "/boot/firmware/cmdline.txt"
+rpi_device_tree_model_path: "/proc/device-tree/model"
+rpi_extra_modules_package: "linux-modules-extra-raspi"
+rpi_required_cgroup_params:
+  - "cgroup_enable=cpuset"
+  - "cgroup_memory=1"
+  - "cgroup_enable=memory"
+allow_rpi_reboot: true
+
+# System preparation settings
+k3s_required_packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gpg
+  - iptables
+  - iproute2
+  - socat
+  - conntrack
+k3s_kernel_modules:
+  - overlay
+  - br_netfilter
+k3s_manage_firewall: false
+
+# Bundled K3s components to disable on every server.
+# Traefik is disabled so playbook 06 can install the upstream chart with HA values.
+k3s_disable_components:
+  - traefik
+
+# Helm
+helm_version: "v3.16.2"
+helm_install_script_url: "https://raw.githubusercontent.com/helm/helm/{{ helm_version }}/scripts/get-helm-3"
+helm_bin_path: "/usr/local/bin/helm"
+
+# Traefik (upstream chart, installed by playbook 06)
+traefik_release_name: "traefik"
+traefik_namespace: "kube-system"
+traefik_chart_repo: "https://traefik.github.io/charts"
+traefik_chart_name: "traefik"
+traefik_chart_version: "39.0.9"
+traefik_values_file: "helm-chart/traefik/values.yaml"
+
+# Gateway API CRDs: only applied if the Traefik chart did not install them
+gateway_api_version: "v1.4.0"
+gateway_api_crd_url: "https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml"
+
+# PMS application
+pms_namespace: "project-management-system"
+pms_release_name: "pms"
+pms_backend_secret_name: "backend-secret"
+pms_postgres_secret_name: "postgres-secret"
+pms_postgres_db: "PMS"
+pms_postgres_service: "postgres-service"
+pms_postgres_port: 5432

@@ -1,0 +1,106 @@
+namespace: project-management-system
+frontend:
+  image:
+    repository: binheo2445/pms_frontend
+    tag: 1bfd9646305311b1dd5af6234d334f14905b5d51
+    pullPolicy: IfNotPresent
+  containerPort: 80
+  service:
+    name: frontend-service
+    port: 8080
+    targetPort: 80
+    type: ClusterIP
+  env:
+    VITE_API_URL: /api
+  resources: {}
+backend:
+  image:
+    repository: binheo2445/pms_backend
+    tag: 1bfd9646305311b1dd5af6234d334f14905b5d51
+    pullPolicy: IfNotPresent
+  containerPort: 5000
+  service:
+    name: backend-service
+    port: 5000
+    targetPort: 5000
+    type: ClusterIP
+  existingSecret: backend-secret
+  secretKeys:
+    databaseUrl: DATABASE_URL
+    accessTokenSecret: ACCESS_TOKEN_SECRET
+  secret:
+    create: false
+  resources: {}
+database:
+  image:
+    repository: postgres
+    tag: "15"
+    pullPolicy: IfNotPresent
+  containerPort: 5432
+  service:
+    name: postgres-service
+    port: 5432
+    targetPort: 5432
+    type: ClusterIP
+  existingSecret: postgres-secret
+  secretKeys:
+    user: POSTGRES_USER
+    password: POSTGRES_PASSWORD
+    database: POSTGRES_DB
+  secret:
+    create: false
+  persistence:
+    enabled: true
+    claimName: postgres-pvc
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+    storageClassName: local-path
+    mountPath: /var/lib/postgresql/data
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+config:
+  data:
+    POSTGRES_DB: PMS
+    POSTGRES_PORT: "5432"
+    POSTGRES_HOST: postgres-service
+gateway:
+  enabled: true
+  gatewayClass:
+    create: true
+    name: traefik-gateway-class
+    controllerName: traefik.io/gateway-controller
+  name: backend-gateway
+  className: traefik-gateway-class
+  listener:
+    name: http
+    protocol: HTTP
+    port: 8000
+    allowedRoutes:
+      namespaces:
+        from: All
+  httpRoute:
+    enabled: true
+    name: backend-http-route
+    parentRefs:
+      - name: backend-gateway
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /api
+        backendRefs:
+          - name: backend-service
+            port: 5000
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /
+        backendRefs:
+          - name: frontend-service
+            port: 8080

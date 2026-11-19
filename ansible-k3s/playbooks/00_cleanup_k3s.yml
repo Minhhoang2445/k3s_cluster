@@ -1,0 +1,56 @@
+---
+# Optional manual cleanup playbook.
+# WARNING: Destructive operation. Requires explicit confirmation:
+#   ansible-playbook playbooks/00_cleanup_k3s.yml -e confirm_k3s_cleanup=true
+- name: Clean K3s from cluster nodes (requires explicit confirmation)
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  pre_tasks:
+    - name: Verify explicit confirmation before running destructive cleanup
+      ansible.builtin.assert:
+        that:
+          - confirm_k3s_cleanup | default(false) | bool
+        fail_msg: >-
+          Refusing to uninstall K3s or delete etcd/cluster data without explicit confirmation.
+          Pass '-e confirm_k3s_cleanup=true' only when you intend to destroy the cluster.
+
+  tasks:
+    - name: Check if K3s server uninstall script exists
+      ansible.builtin.stat:
+        path: "{{ k3s_server_uninstall_script }}"
+      register: k3s_server_uninstall
+
+    - name: Uninstall K3s Server
+      ansible.builtin.command:
+        cmd: "{{ k3s_server_uninstall_script }}"
+      when: k3s_server_uninstall.stat.exists
+      failed_when: false
+
+    - name: Check if K3s agent uninstall script exists
+      ansible.builtin.stat:
+        path: "{{ k3s_agent_uninstall_script }}"
+      register: k3s_agent_uninstall
+
+    - name: Uninstall K3s Agent
+      ansible.builtin.command:
+        cmd: "{{ k3s_agent_uninstall_script }}"
+      when: k3s_agent_uninstall.stat.exists
+      failed_when: false
+
+    - name: Remove K3s configuration and data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher/k3s
+        - /var/lib/rancher/k3s
+        - /var/lib/kubelet
+        - "{{ k3s_install_script_path }}"
+        - "/home/{{ ansible_user }}/.kube"

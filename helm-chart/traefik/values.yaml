@@ -1,0 +1,68 @@
+
+
+# One replica per control-plane node (playbook 06 overrides this with the server count)
+deployment:
+  replicas: 3
+
+nodeSelector:
+  node-role.kubernetes.io/control-plane: "true"
+
+# Never run 2 Traefik pods on the same node
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+            app.kubernetes.io/instance: traefik-kube-system
+        topologyKey: kubernetes.io/hostname
+
+# With required anti-affinity and one pod per node there is no spare node for
+# a surge pod, so take down 1 old pod before creating a new one.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 0
+
+# Always keep at least 2/3 pods during drain/upgrade
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+priorityClassName: system-cluster-critical
+
+tolerations:
+  - key: "CriticalAddonsOnly"
+    operator: "Exists"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+  # Evict pods from a dead node after 30s instead of the default 300s
+  - key: "node.kubernetes.io/unreachable"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+
+providers:
+  kubernetesCRD:
+    enabled: true
+  kubernetesIngress:
+    enabled: true
+  kubernetesGateway:
+    enabled: true
+
+# GatewayClass/Gateway/HTTPRoute are created by the pms chart (helm-chart/pms/templates/gateway).
+# Its Gateway listener uses port 8000, which is Traefik's "web" entrypoint.
+gateway:
+  enabled: false
+gatewayClass:
+  enabled: false
+
+# Exposed on ports 80/443 of every node by K3s ServiceLB
+service:
+  type: LoadBalancer

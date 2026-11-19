@@ -1,0 +1,12 @@
+---
+# Worker-specific configuration for K3s agent nodes (k3s_workers)
+k3s_agent_service_name: "k3s-agent"
+k3s_agent_service_file: "/etc/systemd/system/k3s-agent.service"
+k3s_agent_uninstall_script: "/usr/local/bin/k3s-agent-uninstall.sh"
+k3s_agent_kubeconfig_path: "/var/lib/rancher/k3s/agent/kubelet.kubeconfig"
+
+# Worker required ports
+k3s_worker_required_tcp_ports:
+  - 10250
+k3s_worker_required_udp_ports:
+  - 8472

@@ -1,0 +1,213 @@
+---
+- name: Remove legacy Traefik HelmChartConfig manifest from all K3s HA servers
+  hosts: k3s_servers
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    # Older versions of this playbook wrote a HelmChartConfig for K3s's bundled Traefik here.
+    # K3s re-applies files in this directory, so a stale copy would fight the Helm-managed Traefik.
+    - name: Ensure legacy traefik-config.yaml is absent from K3s manifests directory
+      ansible.builtin.file:
+        path: "{{ k3s_manifests_dir }}/traefik-config.yaml"
+        state: absent
+
+- name: Deploy Traefik (HA) and PMS Helm charts on K3s control plane
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  vars:
+    traefik_replicas: "{{ groups['k3s_servers'] | length }}"
+
+  tasks:
+    - name: Validate PMS secrets are loaded from Ansible Vault
+      ansible.builtin.assert:
+        that:
+          - vault_jwt_access_token_secret is defined
+          - (vault_jwt_access_token_secret | length) > 0
+          - vault_postgres_user is defined
+          - (vault_postgres_user | length) > 0
+          - vault_postgres_password is defined
+          - (vault_postgres_password | length) > 0
+        fail_msg: >-
+          vault_jwt_access_token_secret, vault_postgres_user and vault_postgres_password
+          must be set in vars/vault.yml (see vars/vault.yml.example).
+      no_log: true
+
+    - name: Check installed Helm version if present
+      ansible.builtin.command:
+        cmd: "{{ helm_bin_path }} version --template='{{ '{{' }}.Version{{ '}}' }}'"
+      register: helm_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install pinned Helm 3 ({{ helm_version }}) for {{ ansible_facts['architecture'] }}
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          curl -fsSL {{ helm_install_script_url }} | bash
+        executable: /bin/bash
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+      when: helm_installed_version.rc != 0 or helm_installed_version.stdout != helm_version
+
+    # ---------------------------------------------------------------- Traefik
+
+    - name: Check whether K3s's bundled Traefik is still enabled
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get helmcharts.helm.cattle.io traefik -n kube-system --ignore-not-found -o name"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: bundled_traefik
+      changed_when: false
+
+    - name: Fail if K3s's bundled Traefik would conflict with the Helm-managed release
+      ansible.builtin.assert:
+        that:
+          - bundled_traefik.stdout | length == 0
+        fail_msg: >-
+          K3s's bundled Traefik (HelmChart kube-system/traefik) is still enabled.
+          Add "disable: [traefik]" to /etc/rancher/k3s/config.yaml on every server
+          (or install K3s with --disable=traefik, see k3s_disable_components) and restart k3s.
+
+    - name: Copy Traefik HA values to {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../{{ traefik_values_file }}"
+        dest: "/home/{{ ansible_user }}/traefik-values.yaml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+
+    # The chart also installs the Traefik and Gateway API CRDs on first install.
+    - name: Deploy or upgrade Traefik {{ traefik_chart_version }} ({{ traefik_replicas }} replicas) using Helm
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} upgrade --install {{ traefik_release_name }} {{ traefik_chart_name }}
+          --repo {{ traefik_chart_repo }}
+          --version {{ traefik_chart_version }}
+          --namespace {{ traefik_namespace }}
+          -f /home/{{ ansible_user }}/traefik-values.yaml
+          --set deployment.replicas={{ traefik_replicas }}
+          --wait
+          --timeout 10m
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: traefik_deploy_result
+      changed_when: "'has been upgraded' in traefik_deploy_result.stdout or 'has been installed' in traefik_deploy_result.stdout"
+
+    - name: Check whether Gateway API CRDs are installed
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get crd gateways.gateway.networking.k8s.io --ignore-not-found -o name"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: gateway_crd
+      changed_when: false
+
+    - name: Install Kubernetes Gateway API standard CRDs ({{ gateway_api_version }}) if missing
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl apply --server-side -f {{ gateway_api_crd_url }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      when: gateway_crd.stdout | length == 0
+
+    - name: Wait until every control-plane node runs exactly one ready Traefik pod
+      ansible.builtin.command:
+        cmd: >-
+          {{ k3s_binary_path }} kubectl get pods -n {{ traefik_namespace }}
+          -l app.kubernetes.io/name=traefik,app.kubernetes.io/instance={{ traefik_release_name }}-{{ traefik_namespace }}
+          --field-selector=status.phase=Running
+          -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}'
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: traefik_pod_nodes
+      until: (traefik_pod_nodes.stdout_lines | unique | length) == (traefik_replicas | int)
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Show Traefik pod placement
+      ansible.builtin.debug:
+        msg: "Traefik pods running on: {{ traefik_pod_nodes.stdout_lines | sort | join(', ') }}"
+
+    # -------------------------------------------------------------------- PMS
+
+    - name: Ensure namespace {{ pms_namespace }} exists
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create namespace {{ pms_namespace }} --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: pms_ns_apply
+      changed_when: "'created' in pms_ns_apply.stdout or 'configured' in pms_ns_apply.stdout"
+
+    # The pms chart does not create secrets (backend.secret.create / database.secret.create = false);
+    # it expects these existing secrets.
+    - name: Ensure {{ pms_postgres_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create secret generic {{ pms_postgres_secret_name }} \
+            --namespace {{ pms_namespace }} \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=POSTGRES_DB="$POSTGRES_DB" \
+            --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+        POSTGRES_USER: "{{ vault_postgres_user }}"
+        POSTGRES_PASSWORD: "{{ vault_postgres_password }}"
+        POSTGRES_DB: "{{ pms_postgres_db }}"
+      register: postgres_secret_apply
+      changed_when: "'created' in postgres_secret_apply.stdout or 'configured' in postgres_secret_apply.stdout"
+      no_log: true
+
+    - name: Ensure {{ pms_backend_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create secret generic {{ pms_backend_secret_name }} \
+            --namespace {{ pms_namespace }} \
+            --from-literal=DATABASE_URL="$DATABASE_URL" \
+            --from-literal=ACCESS_TOKEN_SECRET="$JWT_SECRET" \
+            --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+        DATABASE_URL: >-
+          postgresql://{{ vault_postgres_user | urlencode | replace('/', '%2F') }}:{{ vault_postgres_password | urlencode | replace('/', '%2F') }}@{{ pms_postgres_service }}:{{ pms_postgres_port }}/{{ pms_postgres_db }}?schema=public
+        JWT_SECRET: "{{ vault_jwt_access_token_secret }}"
+      register: backend_secret_apply
+      changed_when: "'created' in backend_secret_apply.stdout or 'configured' in backend_secret_apply.stdout"
+      no_log: true
+
+    - name: Copy helm-chart/pms to control-plane node {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../helm-chart/pms"
+        dest: "/home/{{ ansible_user }}/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Deploy or upgrade PMS application using Helm
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} upgrade --install {{ pms_release_name }} /home/{{ ansible_user }}/pms
+          --namespace {{ pms_namespace }}
+          -f /home/{{ ansible_user }}/pms/values.yaml
+          -f /home/{{ ansible_user }}/pms/values-dev.yaml
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: helm_deploy_result
+      changed_when: "'has been upgraded' in helm_deploy_result.stdout or 'has been installed' in helm_deploy_result.stdout"

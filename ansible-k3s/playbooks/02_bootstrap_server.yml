@@ -1,0 +1,146 @@
+---
+- name: Bootstrap initial K3s HA control-plane server with embedded etcd
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Verify node architecture before bootstrapping K3s server
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] in k3s_supported_architectures
+        fail_msg: "Unsupported architecture {{ ansible_facts['architecture'] }} on {{ inventory_hostname }}"
+
+    - name: Ensure K3s agent service is not installed on bootstrap server
+      ansible.builtin.stat:
+        path: /etc/systemd/system/k3s-agent.service
+      register: k3s_agent_unit
+
+    - name: Fail safely if bootstrap server has an existing k3s-agent installation
+      ansible.builtin.assert:
+        that:
+          - not k3s_agent_unit.stat.exists
+        fail_msg: >-
+          Node {{ inventory_hostname }} has /etc/systemd/system/k3s-agent.service installed.
+          Refusing to overwrite an agent installation with a server installation automatically.
+
+    - name: Check for legacy SQLite datastore on bootstrap server
+      ansible.builtin.stat:
+        path: "{{ k3s_sqlite_db_path }}"
+      register: k3s_sqlite_db
+
+    - name: Check if embedded etcd datastore directory already exists
+      ansible.builtin.stat:
+        path: "{{ k3s_etcd_db_dir }}"
+      register: k3s_etcd_db
+
+    - name: Fail safely if legacy SQLite datastore exists without embedded etcd
+      ansible.builtin.assert:
+        that:
+          - not (k3s_sqlite_db.stat.exists and not k3s_etcd_db.stat.exists)
+        fail_msg: >-
+          Legacy SQLite datastore detected at {{ k3s_sqlite_db_path }} on {{ inventory_hostname }}.
+          HA control plane requires embedded etcd (--cluster-init), not SQLite.
+          Refusing to destructively reset existing cluster data automatically.
+
+    - name: Check if K3s server systemd unit exists
+      ansible.builtin.stat:
+        path: "{{ k3s_server_service_file }}"
+      register: k3s_server_unit
+
+    - name: Gather service facts to inspect actual K3s service state
+      ansible.builtin.service_facts:
+
+    - name: Initialize K3s HA server with embedded etcd (--cluster-init) on k3s-1
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_install_script_path }} server
+          --cluster-init
+          --node-ip={{ ansible_host }}
+          --advertise-address={{ ansible_host }}
+          --cluster-cidr={{ pod_network_cidr }}
+          --service-cidr={{ service_cidr }}
+          {% for san in (k3s_tls_san | unique) %}
+          --tls-san={{ san }}
+          {% endfor %}
+          --write-kubeconfig-mode={{ k3s_write_kubeconfig_mode }}
+          {% for component in k3s_disable_components %}
+          --disable={{ component }}
+          {% endfor %}
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_version }}"
+      when: not (k3s_server_unit.stat.exists and k3s_etcd_db.stat.exists)
+
+    - name: Ensure K3s server systemd service is enabled and running
+      ansible.builtin.systemd:
+        name: "{{ k3s_server_service_name }}"
+        enabled: true
+        state: started
+      register: k3s_bootstrap_systemd
+
+    - name: Verify K3s server service is actively running
+      ansible.builtin.assert:
+        that:
+          - k3s_bootstrap_systemd.status.ActiveState == "active"
+        fail_msg: "K3s server service is not active on {{ inventory_hostname }}."
+
+    - name: Wait for K3s API server port {{ k3s_api_port }} to listen on {{ ansible_host }}
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ k3s_api_port }}"
+        state: started
+        timeout: 120
+
+    - name: Wait for embedded etcd peer/client ports (2379, 2380) to listen on {{ ansible_host }}
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ item }}"
+        state: started
+        timeout: 120
+      loop:
+        - 2379
+        - 2380
+
+    - name: Wait for K3s server node-token file to be generated
+      ansible.builtin.wait_for:
+        path: "{{ k3s_node_token_path }}"
+        state: present
+        timeout: 120
+
+    - name: Wait until bootstrap node {{ inventory_hostname }} reports Ready in Kubernetes
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get node {{ inventory_hostname }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}'"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: bootstrap_node_ready
+      until: bootstrap_node_ready.rc == 0 and bootstrap_node_ready.stdout == "True"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Create .kube directory for {{ ansible_user }}
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Copy K3s kubeconfig to /home/{{ ansible_user }}/.kube/config
+      ansible.builtin.copy:
+        src: "{{ k3s_kubeconfig_path }}"
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        remote_src: true
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+
+    - name: Point user kubeconfig server address to configured API endpoint
+      ansible.builtin.replace:
+        path: "/home/{{ ansible_user }}/.kube/config"
+        regexp: 'https://127\.0\.0\.1:{{ k3s_api_port }}'
+        replace: "https://{{ k3s_api_endpoint }}:{{ k3s_api_port }}"

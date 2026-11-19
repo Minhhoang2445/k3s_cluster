@@ -1,0 +1,252 @@
+---
+- name: Prepare all K3s cluster nodes (3 HA servers and 2 workers)
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Architecture & Hardware Inspection (ARM64 / Raspberry Pi Detection)
+    # -------------------------------------------------------------------------
+    - name: Verify node CPU architecture is supported
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] in k3s_supported_architectures
+        fail_msg: >-
+          Unsupported architecture '{{ ansible_facts['architecture'] }}' on {{ inventory_hostname }}.
+          Supported architectures: {{ k3s_supported_architectures | join(', ') }}.
+        success_msg: >-
+          Node {{ inventory_hostname }} architecture verified: {{ ansible_facts['architecture'] }}
+          ({{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}).
+
+    - name: Map Ansible architecture to normalized binary architecture
+      ansible.builtin.set_fact:
+        k3s_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"
+
+    - name: Check for Device Tree model file (/proc/device-tree/model)
+      ansible.builtin.stat:
+        path: "{{ rpi_device_tree_model_path }}"
+      register: dt_model_stat
+
+    - name: Read Device Tree hardware model when present
+      ansible.builtin.slurp:
+        src: "{{ rpi_device_tree_model_path }}"
+      failed_when: false
+      register: dt_model_slurp
+      when: dt_model_stat.stat.exists
+
+    - name: Decode Device Tree hardware model string
+      ansible.builtin.set_fact:
+        dt_model_string: >-
+          {{
+            (dt_model_slurp.content | b64decode | replace('\u0000', '') | trim)
+            if (dt_model_stat.stat.exists and dt_model_slurp.content is defined)
+            else (ansible_facts['product_name'] | default('Generic/VM'))
+          }}
+
+    - name: Check if Raspberry Pi firmware boot cmdline exists
+      ansible.builtin.stat:
+        path: "{{ rpi_cmdline_path }}"
+      register: rpi_cmdline
+
+    - name: Determine whether node is actual Raspberry Pi hardware
+      ansible.builtin.set_fact:
+        is_raspberry_pi: >-
+          {{
+            (ansible_facts['architecture'] == 'aarch64') and
+            (rpi_cmdline.stat.exists | bool) and
+            ('Raspberry Pi' in dt_model_string)
+          }}
+
+    - name: Report detected node hardware profile
+      ansible.builtin.debug:
+        msg: >-
+          Node={{ inventory_hostname }} | IP={{ ansible_host }} |
+          Arch={{ ansible_facts['architecture'] }} ({{ k3s_arch }}) |
+          Model={{ dt_model_string }} |
+          RaspberryPi={{ is_raspberry_pi }}
+
+    # -------------------------------------------------------------------------
+    # 2. Hostname & Hostname Resolution (/etc/hosts)
+    # -------------------------------------------------------------------------
+    - name: Set unique hostname for each node
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Ensure local hostname is mapped to 127.0.1.1 in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s+'
+        line: "127.0.1.1 {{ inventory_hostname }}"
+        state: present
+
+    - name: Ensure all 5 K3s cluster nodes are resolvable in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\s*{{ hostvars[item].ansible_host | regex_escape }}\s+.*\b{{ item | regex_escape }}\b'
+        line: "{{ hostvars[item].ansible_host }} {{ item }}"
+        state: present
+      loop: "{{ groups['k3s_cluster'] }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Swap Configuration (Idempotent)
+    # -------------------------------------------------------------------------
+    - name: Disable active swap immediately when swap is in use
+      ansible.builtin.command:
+        cmd: swapoff -a
+      when: (ansible_facts['swaptotal_mb'] | default(0) | int) > 0
+      changed_when: true
+
+    - name: Disable swap permanently in /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^(\s*[^#\s]\S*\s+\S+\s+swap\s+.*)$'
+        replace: '# \1'
+
+    # -------------------------------------------------------------------------
+    # 4. Required System Packages & Time Synchronization
+    # -------------------------------------------------------------------------
+    - name: Install required system packages for K3s and networking
+      ansible.builtin.apt:
+        name: "{{ k3s_required_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ensure systemd-timesyncd service is enabled and running for etcd clock sync
+      ansible.builtin.systemd:
+        name: systemd-timesyncd
+        enabled: true
+        state: started
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # 5. Raspberry Pi-Specific Kernel & Boot Configuration (Hardware-Guarded)
+    # -------------------------------------------------------------------------
+    - name: Check availability of optional Raspberry Pi extra kernel modules package
+      ansible.builtin.command:
+        cmd: apt-cache policy {{ rpi_extra_modules_package }}
+      register: rpi_pkg_policy
+      changed_when: false
+      failed_when: false
+      when: is_raspberry_pi | bool
+
+    - name: Install extra kernel modules for Raspberry Pi (VXLAN/bridge support) when available
+      ansible.builtin.apt:
+        name: "{{ rpi_extra_modules_package }}"
+        state: present
+      when:
+        - is_raspberry_pi | bool
+        - rpi_pkg_policy.rc == 0
+        - "'Candidate:' in rpi_pkg_policy.stdout"
+        - "'Candidate: (none)' not in rpi_pkg_policy.stdout"
+      register: rpi_modules
+
+    - name: Ensure required cgroup parameters exist in Raspberry Pi cmdline.txt without duplicates
+      ansible.builtin.replace:
+        path: "{{ rpi_cmdline_path }}"
+        regexp: '^(?!.*\b{{ item | regex_escape }}\b)(.+)$'
+        replace: '\1 {{ item }}'
+      loop: "{{ rpi_required_cgroup_params }}"
+      when:
+        - is_raspberry_pi | bool
+        - rpi_cmdline.stat.exists
+      register: rpi_cgroup
+
+    - name: Reboot Raspberry Pi only if boot cmdline cgroup parameters were updated
+      ansible.builtin.reboot:
+        msg: "Rebooting Raspberry Pi to apply updated cgroup boot parameters"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 15
+      when:
+        - is_raspberry_pi | bool
+        - allow_rpi_reboot | default(true) | bool
+        - rpi_cgroup is defined and rpi_cgroup is changed
+
+    # -------------------------------------------------------------------------
+    # 6. Kernel Modules & Sysctl Networking Configuration
+    # -------------------------------------------------------------------------
+    - name: Persist K3s required kernel modules across reboots
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k3s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Load required kernel modules for K3s container networking
+      ansible.builtin.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ k3s_kernel_modules }}"
+
+    - name: Configure K3s networking sysctl parameters
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/k3s.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        mode: "0644"
+      register: k3s_sysctl_file
+
+    - name: Apply sysctl settings when configuration changes
+      ansible.builtin.command:
+        cmd: sysctl --system
+      when: k3s_sysctl_file.changed
+
+    # -------------------------------------------------------------------------
+    # 7. Firewall (UFW) Inspection & Port Rules (Only if UFW is active/enabled)
+    # -------------------------------------------------------------------------
+    - name: Check if UFW firewall is active
+      ansible.builtin.command:
+        cmd: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    - name: Allow required server TCP ports in UFW when firewall is active
+      ansible.builtin.command:
+        cmd: "ufw allow {{ item }}/tcp"
+      loop: "{{ k3s_server_required_tcp_ports }}"
+      when:
+        - inventory_hostname in groups['k3s_servers']
+        - "(k3s_manage_firewall | bool) or ('Status: active' in (ufw_status.stdout | default('')))"
+      register: ufw_server_tcp
+      changed_when: "'Rule added' in (ufw_server_tcp.stdout | default(''))"
+
+    - name: Allow required worker TCP ports in UFW when firewall is active
+      ansible.builtin.command:
+        cmd: "ufw allow {{ item }}/tcp"
+      loop: "{{ k3s_worker_required_tcp_ports }}"
+      when:
+        - inventory_hostname in groups['k3s_workers']
+        - "(k3s_manage_firewall | bool) or ('Status: active' in (ufw_status.stdout | default('')))"
+      register: ufw_worker_tcp
+      changed_when: "'Rule added' in (ufw_worker_tcp.stdout | default(''))"
+
+    - name: Allow Flannel VXLAN UDP port 8472 on all cluster nodes when firewall is active
+      ansible.builtin.command:
+        cmd: "ufw allow 8472/udp"
+      when:
+        - "(k3s_manage_firewall | bool) or ('Status: active' in (ufw_status.stdout | default('')))"
+      register: ufw_vxlan
+      changed_when: "'Rule added' in (ufw_vxlan.stdout | default(''))"
+
+    # -------------------------------------------------------------------------
+    # 8. Download Official K3s Installation Script (ARM64 & x86_64 Compatible)
+    # -------------------------------------------------------------------------
+    - name: Download official K3s installation script
+      ansible.builtin.get_url:
+        url: "{{ k3s_install_script_url }}"
+        dest: "{{ k3s_install_script_path }}"
+        owner: root
+        group: root
+        mode: "0755"

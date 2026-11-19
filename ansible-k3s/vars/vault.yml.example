@@ -1,0 +1,15 @@
+---
+# Example Ansible Vault secrets file.
+# Copy to vars/vault.yml and encrypt with:
+#   ansible-vault encrypt vars/vault.yml
+
+# Privilege escalation passwords
+vault_ansible_become_password: "CHANGE_ME_SERVER_BECOME_PASSWORD"
+vault_worker_become_password: "CHANGE_ME_WORKER_BECOME_PASSWORD"
+
+# PMS Application Secrets
+vault_jwt_access_token_secret: "CHANGE_ME_JWT_ACCESS_TOKEN_SECRET"
+
+# PostgreSQL credentials (used for postgres-secret and the backend DATABASE_URL)
+vault_postgres_user: "CHANGE_ME_POSTGRES_USER"
+vault_postgres_password: "CHANGE_ME_POSTGRES_PASSWORD"

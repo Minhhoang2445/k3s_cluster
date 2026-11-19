@@ -1,0 +1,19 @@
+---
+# Master orchestration playbook for the 5-node K3s HA Cluster (3 HA servers + 2 workers)
+# Stage 1: Prepare all five nodes (k3s_cluster)
+- import_playbook: playbooks/01_prepare.yml
+
+# Stage 2: Bootstrap initial K3s HA server with embedded etcd on k3s-1
+- import_playbook: playbooks/02_bootstrap_server.yml
+
+# Stage 3: Join k3s-2 and k3s-3 as additional K3s HA control-plane servers
+- import_playbook: playbooks/03_join_servers.yml
+
+# Stage 4: Join worker1 and worker2 as K3s worker agents
+- import_playbook: playbooks/04_join_worker.yml
+
+# Stage 5: Verify the 5-node cluster and 3-node embedded etcd HA membership
+- import_playbook: playbooks/05_verify_cluster.yml
+
+# Stage 6: Deploy PMS application using Helm
+- import_playbook: playbooks/06_deploy_helm.yml

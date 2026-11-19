@@ -1,0 +1,11 @@
+import authRoute from './authRoute.js';
+import express from 'express';
+import userRoute from './userRoute.js';
+import adminRoute from './adminRoute.js';
+import projectRoute from './projectRoute.js';
+const router = express.Router();
+router.use('/auth', authRoute);
+router.use('/user', userRoute);
+router.use('/admin', adminRoute);
+router.use('/project', projectRoute);
+export default router;

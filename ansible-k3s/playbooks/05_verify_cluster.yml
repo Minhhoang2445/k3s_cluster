@@ -1,0 +1,232 @@
+---
+# Play 1: Verify node-level architecture, systemd services, local etcd state, and network connectivity across all 5 nodes
+- name: Verify system architecture, K3s services, and network connectivity on all cluster nodes
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Verify node CPU architecture compatibility
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['architecture'] in k3s_supported_architectures
+        fail_msg: "Incompatible CPU architecture {{ ansible_facts['architecture'] }} on {{ inventory_hostname }}."
+        success_msg: "Node {{ inventory_hostname }} CPU architecture verified: {{ ansible_facts['architecture'] }}."
+
+    - name: Gather systemd service facts on node
+      ansible.builtin.service_facts:
+
+    - name: Verify k3s.service is active and enabled on server nodes
+      ansible.builtin.assert:
+        that:
+          - "'k3s.service' in ansible_facts.services"
+          - ansible_facts.services['k3s.service'].state == 'running'
+          - ansible_facts.services['k3s.service'].status == 'enabled'
+        fail_msg: "k3s.service is not running and enabled on server node {{ inventory_hostname }}."
+        success_msg: "k3s.service is running and enabled on server node {{ inventory_hostname }}."
+      when: inventory_hostname in groups['k3s_servers']
+
+    - name: Verify embedded etcd datastore and local etcd health on server nodes
+      when: inventory_hostname in groups['k3s_servers']
+      block:
+        - name: Check embedded etcd member data directory on server node
+          ansible.builtin.stat:
+            path: "{{ k3s_etcd_db_dir }}/member"
+          register: etcd_member_dir
+
+        - name: Assert embedded etcd datastore exists on server node
+          ansible.builtin.assert:
+            that:
+              - etcd_member_dir.stat.exists
+              - etcd_member_dir.stat.isdir
+            fail_msg: "Embedded etcd datastore directory {{ k3s_etcd_db_dir }}/member is missing on {{ inventory_hostname }}."
+
+        - name: Query local embedded etcd /health endpoint via mTLS
+          ansible.builtin.command:
+            cmd: >
+              curl -fsSL
+              --cacert {{ k3s_etcd_tls_dir }}/server-ca.crt
+              --cert {{ k3s_etcd_tls_dir }}/server-client.crt
+              --key {{ k3s_etcd_tls_dir }}/server-client.key
+              https://127.0.0.1:2382/health
+          register: local_etcd_health
+          changed_when: false
+
+        - name: Assert local embedded etcd endpoint reports healthy
+          ansible.builtin.assert:
+            that:
+              - (local_etcd_health.stdout | from_json).health == "true"
+            fail_msg: "Local embedded etcd health check failed on {{ inventory_hostname }}: {{ local_etcd_health.stdout }}"
+            success_msg: "Local embedded etcd on {{ inventory_hostname }} is healthy."
+
+    - name: Verify k3s-agent.service is active and k3s.service is absent on worker nodes
+      ansible.builtin.assert:
+        that:
+          - "'k3s-agent.service' in ansible_facts.services"
+          - ansible_facts.services['k3s-agent.service'].state == 'running'
+          - ansible_facts.services['k3s-agent.service'].status == 'enabled'
+          - "'k3s.service' not in ansible_facts.services or ansible_facts.services['k3s.service'].state != 'running'"
+        fail_msg: "k3s-agent.service is not running properly (or k3s.service is present) on worker {{ inventory_hostname }}."
+        success_msg: "k3s-agent.service is running and enabled on worker {{ inventory_hostname }}."
+      when: inventory_hostname in groups['k3s_workers']
+
+    - name: Verify network connectivity from node to K3s API endpoint {{ k3s_api_endpoint }}:{{ k3s_api_port }}
+      ansible.builtin.wait_for:
+        host: "{{ k3s_api_endpoint }}"
+        port: "{{ k3s_api_port }}"
+        state: started
+        timeout: 15
+
+
+# Play 2: Verify Kubernetes cluster topology, 5 Ready nodes, server/agent roles, and 3-node embedded etcd quorum
+- name: Verify 5-node Kubernetes cluster state and 3-node embedded etcd HA membership
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Fetch Kubernetes nodes in JSON format
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get nodes -o json"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: kubectl_nodes_json
+      changed_when: false
+
+    - name: Parse Kubernetes node inventory facts
+      ansible.builtin.set_fact:
+        k8s_nodes: "{{ (kubectl_nodes_json.stdout | from_json)['items'] }}"
+
+    - name: Build structured map of discovered cluster nodes
+      ansible.builtin.set_fact:
+        discovered_node_names: "{{ k8s_nodes | map(attribute='metadata.name') | list }}"
+        ready_node_names: >-
+          {{
+            k8s_nodes
+            | selectattr('status.conditions', 'defined')
+            | map(attribute='metadata.name')
+            | list
+          }}
+# sua lai thanh 5 node khi deploy len raspberry
+    - name: Verify the cluster contains all 4 expected nodes (3 servers + 2 workers)
+      ansible.builtin.assert:
+        that:
+          - (k8s_nodes | length) == 4
+          - (groups['k3s_servers'] | difference(discovered_node_names) | length) == 0
+          - (groups['k3s_workers'] | difference(discovered_node_names) | length) == 0
+        fail_msg: >-
+          Cluster node mismatch. Expected 4 nodes ({{ groups['k3s_cluster'] | join(', ') }}),
+          found {{ k8s_nodes | length }}: {{ discovered_node_names | join(', ') }}.
+        success_msg: "All 4 expected nodes ({{ discovered_node_names | join(', ') }}) are registered in the cluster."
+
+    - name: Verify Ready status for each of the 3 HA server nodes and 2 worker nodes
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              item.status.conditions
+              | selectattr('type', 'equalto', 'Ready')
+              | map(attribute='status')
+              | first
+            ) == 'True'
+        fail_msg: "Node {{ item.metadata.name }} is NOT Ready."
+        success_msg: "Node {{ item.metadata.name }} ({{ item.status.nodeInfo.architecture }}) is Ready."
+      loop: "{{ k8s_nodes }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    - name: Verify all 3 server nodes have control-plane and etcd roles and annotations
+      ansible.builtin.assert:
+        that:
+          - "'node-role.kubernetes.io/control-plane' in item.metadata.labels"
+          - "'node-role.kubernetes.io/etcd' in item.metadata.labels"
+          - "'etcd.k3s.cattle.io/node-address' in item.metadata.annotations"
+          - "'etcd.k3s.cattle.io/node-name' in item.metadata.annotations"
+        fail_msg: "Server node {{ item.metadata.name }} is missing control-plane/etcd roles or etcd annotations."
+        success_msg: "Server node {{ item.metadata.name }} verified with control-plane and embedded etcd roles."
+      loop: "{{ k8s_nodes | selectattr('metadata.name', 'in', groups['k3s_servers']) | list }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+    # - name: Verify both worker nodes are registered strictly as agents (no control-plane or etcd roles)
+    #   ansible.builtin.assert:
+    #     that:
+    #       - "'node-role.kubernetes.io/control-plane' not in item.metadata.labels"
+    #       - "'node-role.kubernetes.io/etcd' not in item.metadata.labels"
+    #     fail_msg: "Worker node {{ item.metadata.name }} unexpectedly has control-plane or etcd role labels."
+    #     success_msg: "Worker node {{ item.metadata.name }} verified as a dedicated K3s agent node."
+    #   loop: "{{ k8s_nodes | selectattr('metadata.name', 'in', groups['k3s_workers']) | list }}"
+    #   loop_control:
+    #     label: "{{ item.metadata.name }}"
+
+    - name: Query embedded etcd v3 cluster member list via mTLS
+      ansible.builtin.command:
+        cmd: >
+          curl -fsSL -X POST
+          -H "Content-Type: application/json"
+          -H "Accept: application/json"
+          -d '{}'
+          --cacert {{ k3s_etcd_tls_dir }}/server-ca.crt
+          --cert {{ k3s_etcd_tls_dir }}/server-client.crt
+          --key {{ k3s_etcd_tls_dir }}/server-client.key
+          https://127.0.0.1:2382/v3/cluster/member/list
+      register: etcd_member_list_raw
+      changed_when: false
+
+    - name: Parse embedded etcd cluster member list
+      ansible.builtin.set_fact:
+        etcd_members: "{{ (etcd_member_list_raw.stdout | from_json).members | default([]) }}"
+
+    - name: Verify all 3 K3s server nodes are active voting members in embedded etcd
+      ansible.builtin.assert:
+        that:
+          - (etcd_members | length) == 3
+          - (etcd_members | selectattr('isLearner', 'defined') | list | length) == 0
+          - >-
+            (
+              etcd_members
+              | map(attribute='peerURLs')
+              | flatten
+              | join(' ')
+            ) is search('192\.168\.64\.6:2380')
+          - >-
+            (
+              etcd_members
+              | map(attribute='peerURLs')
+              | flatten
+              | join(' ')
+            ) is search('192\.168\.64\.7:2380')
+          - >-
+            (
+              etcd_members
+              | map(attribute='peerURLs')
+              | flatten
+              | join(' ')
+            ) is search('192\.168\.64\.8:2380')
+        fail_msg: >-
+          Embedded etcd HA verification failed! Expected 3 voting etcd members across
+          192.168.64.6, 192.168.64.7, and 192.168.64.8, but found: {{ etcd_members }}.
+        success_msg: >-
+          Embedded etcd HA quorum verified: 3 active voting members ({{ etcd_members | map(attribute='name') | join(', ') }}).
+
+    - name: Display human-readable kubectl node table
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get nodes -o wide"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: nodes_wide_table
+      changed_when: false
+
+    - name: Print cluster verification summary
+      ansible.builtin.debug:
+        msg: "{{ nodes_wide_table.stdout_lines }}"

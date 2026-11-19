@@ -1,0 +1,11 @@
+# Ansible Vault password and decrypted secrets (never commit to Git)
+.vault_pass
+vars/vault.yml
+
+# Ansible retry and temporary files
+*.retry
+.ansible/
+
+# Fetched kubeconfig or temporary artifacts
+kubeconfig
+*.kubeconfig
