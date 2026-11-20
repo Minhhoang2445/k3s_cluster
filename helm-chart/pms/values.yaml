@@ -12,7 +12,31 @@ frontend:
     type: ClusterIP
   env:
     VITE_API_URL: /api
-  resources: {}
+  replicaCount: 3              # used only when autoscaling.enabled=false
+  strategy:
+    maxSurge: 1
+    maxUnavailable: 0          # never drop below the desired ready count during a rollout
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi             # no CPU limit: avoids throttling
+  probes:
+    path: /
+    startup:   { periodSeconds: 5, failureThreshold: 6 }
+    readiness: { periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3 }
+    liveness:  { periodSeconds: 20, timeoutSeconds: 3, failureThreshold: 3 }
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    scaleDownStabilizationSeconds: 300
+
 backend:
   image:
     repository: binheo2445/pms_backend
@@ -30,7 +54,32 @@ backend:
     accessTokenSecret: ACCESS_TOKEN_SECRET
   secret:
     create: false
-  resources: {}
+  replicaCount: 3              # used only when autoscaling.enabled=false
+  strategy:
+    maxSurge: 1
+    maxUnavailable: 0
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+  probes:
+    path: /health              # served at the root, does not touch the DB
+    # The container runs "prisma db push" before starting: allow up to 180s.
+    startup:   { periodSeconds: 5, failureThreshold: 36 }
+    readiness: { periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3 }
+    liveness:  { periodSeconds: 20, timeoutSeconds: 3, failureThreshold: 3 }
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    scaleDownStabilizationSeconds: 300
+
 database:
   image:
     repository: postgres
@@ -64,11 +113,21 @@ database:
     limits:
       cpu: "1"
       memory: 1Gi
+# Shared HA settings for the stateless workloads (backend, frontend)
+
+highAvailability:
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  # Default is 300s; replace pods on a dead node after ~40s detection + 30s
+  nodeFailureTolerationSeconds: 30
 config:
   data:
     POSTGRES_DB: PMS
     POSTGRES_PORT: "5432"
     POSTGRES_HOST: postgres-service
+    
 gateway:
   enabled: true
   gatewayClass:

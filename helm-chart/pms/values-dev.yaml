@@ -6,12 +6,12 @@
 namespace: project-management-system
 
 frontend:
-  replicaCount: 3
+  # Replica count is managed by the HPA (minReplicas in values.yaml)
   image:
     pullPolicy: IfNotPresent
 
 backend:
-  replicaCount: 3
+  # Replica count is managed by the HPA (minReplicas in values.yaml)
   image:
     pullPolicy: IfNotPresent
 
