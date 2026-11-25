@@ -1,0 +1,12 @@
+# Voluntary disruptions (kubectl drain, node upgrades) may evict at most one
+# frontend pod at a time; the drain waits until the replacement is Ready.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: project-management-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: frontend

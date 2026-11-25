@@ -1,0 +1,27 @@
+# Scales backend-deployment between 3 and 6 pods on CPU usage (metrics-server
+# ships with k3s). Utilization = CPU used / CPU requests of the Deployment.
+# minReplicas 3 is the HA floor: the HPA never goes below it.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: project-management-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend-deployment
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0      # add pods immediately under load
+    scaleDown:
+      stabilizationWindowSeconds: 300    # wait 5 min before removing pods (no flapping)

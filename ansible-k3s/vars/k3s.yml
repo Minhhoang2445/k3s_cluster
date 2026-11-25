@@ -59,7 +59,9 @@ gateway_api_crd_url: "https://github.com/kubernetes-sigs/gateway-api/releases/do
 
 # PMS application
 pms_namespace: "project-management-system"
-pms_release_name: "pms"
+# Plain Kubernetes manifests of the PMS application (applied by playbook 06, synced by ArgoCD)
+pms_manifests_dir: "manifests/pms"
+pms_manifests_remote_dir: "/home/{{ ansible_user }}/pms-manifests"
 pms_backend_secret_name: "backend-secret"
 pms_postgres_secret_name: "postgres-secret"
 pms_postgres_db: "PMS"

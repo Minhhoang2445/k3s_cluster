@@ -1,0 +1,17 @@
+# The entry point handled by Traefik. Port 8000 is Traefik's "web" entrypoint
+# inside the pod; the Traefik LoadBalancer Service exposes it as port 80.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: backend-gateway
+  namespace: project-management-system
+spec:
+  gatewayClassName: traefik-gateway-class
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8000
+      allowedRoutes:
+        # HTTPRoutes from any namespace may attach (e.g. Grafana in "monitoring")
+        namespaces:
+          from: All

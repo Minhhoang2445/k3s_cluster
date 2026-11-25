@@ -1,0 +1,11 @@
+# Non-secret database settings. Credentials are NOT here: they live in the
+# "backend-secret" / "postgres-secret" Secrets created by Ansible from the Vault.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: project-management-system
+data:
+  POSTGRES_DB: PMS
+  POSTGRES_HOST: postgres-service
+  POSTGRES_PORT: "5432"

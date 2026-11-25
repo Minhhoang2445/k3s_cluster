@@ -192,22 +192,28 @@
       changed_when: "'created' in backend_secret_apply.stdout or 'configured' in backend_secret_apply.stdout"
       no_log: true
 
-    - name: Copy helm-chart/pms to control-plane node {{ inventory_hostname }}
+    # The PMS application is plain Kubernetes YAML (manifests/pms), applied with kubectl.
+    # The target directory is recreated so files removed from the repo do not linger.
+    - name: Remove previous copy of the PMS manifests on {{ inventory_hostname }}
+      ansible.builtin.file:
+        path: "{{ pms_manifests_remote_dir }}"
+        state: absent
+
+    - name: Copy {{ pms_manifests_dir }} to control-plane node {{ inventory_hostname }}
       ansible.builtin.copy:
-        src: "{{ inventory_dir }}/../../helm-chart/pms"
-        dest: "/home/{{ ansible_user }}/"
+        src: "{{ inventory_dir }}/../../{{ pms_manifests_dir }}/"
+        dest: "{{ pms_manifests_remote_dir }}/"
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
-        mode: "0755"
+        mode: "0644"
+        directory_mode: "0755"
 
-    - name: Deploy or upgrade PMS application using Helm
+    - name: Deploy or update PMS application from plain manifests
       ansible.builtin.command:
         cmd: >
-          {{ helm_bin_path }} upgrade --install {{ pms_release_name }} /home/{{ ansible_user }}/pms
-          --namespace {{ pms_namespace }}
-          -f /home/{{ ansible_user }}/pms/values.yaml
-          -f /home/{{ ansible_user }}/pms/values-dev.yaml
+          {{ k3s_binary_path }} kubectl apply --recursive
+          -f {{ pms_manifests_remote_dir }}
       environment:
         KUBECONFIG: "{{ k3s_kubeconfig_path }}"
-      register: helm_deploy_result
-      changed_when: "'has been upgraded' in helm_deploy_result.stdout or 'has been installed' in helm_deploy_result.stdout"
+      register: pms_apply_result
+      changed_when: "'created' in pms_apply_result.stdout or 'configured' in pms_apply_result.stdout"

@@ -1,0 +1,93 @@
+# Backend API (Node.js/Express + Prisma) on port 5000.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: project-management-system
+spec:
+  # No "replicas" field: the pod count is owned by backend-hpa (3-6 pods).
+  # Setting it here would make ArgoCD (selfHeal) reset it and fight the HPA.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # create at most 1 extra pod during a rollout
+      maxUnavailable: 0    # never drop below the desired number of Ready pods
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      # Spread replicas across nodes (skew <= 1) so a node failure only takes
+      # out part of the backend. ScheduleAnyway: still schedule if impossible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: backend
+      # Evict pods from a failed node after 30s instead of the default 300s.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      containers:
+        - name: backend-container
+          image: binheo2445/pms_backend:1bfd9646305311b1dd5af6234d334f14905b5d51
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+          # Secrets created by Ansible (playbook 06) from the Vault
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: DATABASE_URL
+            - name: ACCESS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: ACCESS_TOKEN_SECRET
+          # /health only returns "OK" (no DB check), so a DB outage never makes
+          # the liveness probe restart every backend pod.
+          # startup: up to 36 x 5s = 180s, the container runs "prisma db push" first.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          # readiness: failing -> pod removed from Service endpoints (no traffic)
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # liveness: failing -> container restarted
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # requests: used by the scheduler and by the HPA (% CPU).
+          # Memory limit only: no CPU limit, to avoid CPU throttling.
+          resources:
+            limits:
+              memory: 384Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi

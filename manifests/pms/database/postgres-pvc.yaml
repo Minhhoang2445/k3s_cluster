@@ -1,0 +1,15 @@
+# Persistent storage for PostgreSQL data. "local-path" (k3s default) creates a
+# directory on the disk of the node where the pod is first scheduled, so the
+# Postgres pod stays bound to that node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: project-management-system
+spec:
+  accessModes:
+    - ReadWriteOnce          # mounted by one node at a time
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: "local-path"

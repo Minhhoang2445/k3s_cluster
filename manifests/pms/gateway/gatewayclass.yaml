@@ -1,0 +1,9 @@
+# Declares that Gateways of class "traefik-gateway-class" are implemented by
+# Traefik (its Gateway API provider is enabled in helm-chart/traefik/values.yaml).
+# Cluster-scoped: no namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: traefik-gateway-class
+spec:
+  controllerName: traefik.io/gateway-controller

@@ -1,10 +1,13 @@
+# Single PostgreSQL instance (to be replaced by a CloudNativePG cluster).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
-  namespace: {{ .Values.namespace }}
+  namespace: project-management-system
 spec:
-  replicas: {{ .Values.database.replicaCount }}
+  replicas: 1
+  # Recreate: stop the old pod before starting the new one. Two Postgres
+  # processes must never use the same data directory (RWO volume).
   strategy:
     type: Recreate
   selector:
@@ -17,27 +20,29 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: {{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}
-          imagePullPolicy: {{ .Values.database.image.pullPolicy }}
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
           ports:
             - name: postgres
-              containerPort: {{ .Values.database.containerPort }}
+              containerPort: 5432
+          # Credentials come from the Secret created by Ansible (playbook 06)
           env:
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.database.existingSecret }}
-                  key: {{ .Values.database.secretKeys.user }}
+                  name: postgres-secret
+                  key: POSTGRES_USER
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.database.existingSecret }}
-                  key: {{ .Values.database.secretKeys.password }}
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.database.existingSecret }}
-                  key: {{ .Values.database.secretKeys.database }}
+                  name: postgres-secret
+                  key: POSTGRES_DB
+          # pg_isready: the server accepts connections for this user/database
           readinessProbe:
             exec:
               command:
@@ -55,11 +60,16 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
-{{ toYaml .Values.database.resources | nindent 12 }}
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - name: postgres-storage
-              mountPath: {{ .Values.database.persistence.mountPath }}
+              mountPath: /var/lib/postgresql/data
       volumes:
         - name: postgres-storage
           persistentVolumeClaim:
-            claimName: {{ .Values.database.persistence.claimName }}
+            claimName: postgres-pvc
