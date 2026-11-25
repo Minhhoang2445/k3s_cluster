@@ -130,16 +130,26 @@
       delay: 10
       changed_when: false
 
-    - name: Ensure namespace {{ argocd_namespace }} exists
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          {{ k3s_binary_path }} kubectl create namespace {{ argocd_namespace }} --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
-        executable: /bin/bash
+    # Create only when missing: an existing namespace is left untouched (patching it goes
+    # through admission webhooks, e.g. Rancher's, that may be briefly unavailable).
+    - name: Check whether namespace {{ argocd_namespace }} exists
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get namespace {{ argocd_namespace }} --ignore-not-found -o name"
       environment:
         KUBECONFIG: "{{ k3s_kubeconfig_path }}"
-      register: argocd_ns_apply
-      changed_when: "'created' in argocd_ns_apply.stdout or 'configured' in argocd_ns_apply.stdout"
+      register: argocd_ns
+      changed_when: false
+
+    - name: Create namespace {{ argocd_namespace }}
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl create namespace {{ argocd_namespace }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      when: argocd_ns.stdout | length == 0
+      register: argocd_ns_create
+      retries: 5
+      delay: 10
+      until: argocd_ns_create.rc == 0
 
     # Server-side apply: the ArgoCD CRDs are too large for the client-side
     # last-applied-configuration annotation. --force-conflicts takes over fields

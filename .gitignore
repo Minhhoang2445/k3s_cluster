@@ -38,3 +38,7 @@ haproxy/
 # Old Helm chart of the PMS application, replaced by manifests/pms (kept locally only).
 # helm-chart/traefik and helm-chart/monitoring are still used and stay tracked.
 helm-chart/pms/
+
+# Locust results
+stress-test/results/
+stress-test/__pycache__/
