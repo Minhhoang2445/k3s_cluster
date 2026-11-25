@@ -31,7 +31,7 @@ spec:
   bootstrap:
     initdb:
       database: pms
-      owner: admin          # = pms_cnpg_owner (vars/k3s.yml), username in pms-db-app
+      owner: pms            # = pms_cnpg_owner (vars/k3s.yml), username in pms-db-app
       secret:
         name: pms-db-app
 
