@@ -1,0 +1,38 @@
+# ArgoCD UI through the existing Traefik Gateway (http://argocd.pms.local).
+# Add "<HAProxy/Mac IP or node IP> argocd.pms.local" to /etc/hosts on the client.
+#
+# Prerequisite: argocd-server must serve plain HTTP (TLS is not terminated by
+# Traefik here), otherwise it redirects every request to HTTPS:
+#   kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge \
+#     -p '{"data":{"server.insecure":"true"}}'
+#   kubectl -n argocd rollout restart deployment argocd-server
+#
+# Apply: kubectl apply -f manifests/argocd/httproute.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argocd
+  namespace: argocd
+spec:
+  parentRefs:
+    - name: backend-gateway
+      namespace: project-management-system
+  hostnames:
+    - argocd.pms.local
+  rules:
+    # The pms route sends PathPrefix /api (any host) to the PMS backend. The ArgoCD
+    # UI calls /api/v1/*, so match it explicitly: Host + /api outranks the host-less rule.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: argocd-server
+          port: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: argocd-server
+          port: 80
