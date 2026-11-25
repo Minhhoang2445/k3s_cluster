@@ -9,9 +9,7 @@ manifests/pms/
 ├── config/
 │   └── backend-configmap.yaml     ConfigMap   backend-config        cấu hình DB không bí mật
 ├── database/
-│   ├── postgres-pvc.yaml          PVC         postgres-pvc          5Gi, local-path
-│   ├── postgres-deployment.yaml   Deployment  postgres              1 pod, Recreate, pg_isready
-│   └── postgres-service.yaml      Service     postgres-service      :5432
+│   └── cnpg-cluster.yaml          Cluster     pms-db                CloudNativePG: 3 instance, async
 ├── backend/
 │   ├── deployment.yaml            Deployment  backend-deployment    Node.js :5000
 │   ├── service.yaml               Service     backend-service       :5000
@@ -30,12 +28,21 @@ manifests/pms/
 
 Mọi object đều nằm trong namespace `project-management-system`, trừ `GatewayClass` là object cấp cụm.
 
+`Cluster` là một Custom Resource. Operator CloudNativePG (cài bằng playbook 08) đọc object này và tự tạo:
+- 3 pod `pms-db-1..3`;
+- 3 PVC;
+- các Service `pms-db-rw`, `pms-db-ro`, `pms-db-r`;
+- các Secret nội bộ và PodDisruptionBudget.
+
 ## Luồng một request
 
 ```
 Client ─▶ HAProxy (Mac) ─▶ node:80 ─▶ Traefik (3 pod trên 3 master)
           ─▶ Gateway backend-gateway ─▶ HTTPRoute backend-http-route
-               ├─ /api/... ─▶ backend-service:5000 ─▶ pod backend ─▶ postgres-service:5432 ─▶ pod postgres
+               ├─ /api/... ─▶ backend-service:5000 ─▶ pod backend ─▶ pms-db-rw:5432 ─▶ PRIMARY
+               │                                                       │ streaming replication (async)
+               │                                                       ├─▶ STANDBY
+               │                                                       └─▶ STANDBY
                └─ /...     ─▶ frontend-service:8080 ─▶ pod frontend (nginx)
 ```
 
@@ -52,14 +59,28 @@ Client ─▶ HAProxy (Mac) ─▶ node:80 ─▶ Traefik (3 pod trên 3 master)
 | Tolerations 30s | `deployment.yaml` | Pod trên node chết được thay sau khoảng 70 giây thay vì hơn 5 phút |
 | PodDisruptionBudget | `pdb.yaml` | `kubectl drain` chỉ đuổi một pod mỗi lần |
 
-PostgreSQL hiện chỉ có một instance. Đây là điểm chết duy nhất còn lại (sẽ thay bằng CloudNativePG).
+## PostgreSQL HA (CloudNativePG)
+
+| Cấu hình | Giá trị | Ý nghĩa |
+|---|---|---|
+| `instances: 3` | 1 primary + 2 standby | Mất một instance thì vẫn còn hai instance có đầy đủ dữ liệu |
+| Không khai báo `synchronous` | Replication **bất đồng bộ** | Lệnh commit không phải chờ standby, nên ghi nhanh. Đổi lại, khi primary sập đột ngột có thể mất vài giao dịch cuối chưa kịp gửi sang standby |
+| `podAntiAffinityType: required` | Mỗi node tối đa 1 instance | Một node chết chỉ mất một instance |
+| Service `pms-db-rw` | Luôn trỏ tới primary hiện tại | Khi failover, operator promote một standby lên làm primary và chuyển Service sang đó. Backend không cần sửa cấu hình |
+| `storage: local-path` | Mỗi instance có một PVC trên đĩa node của nó | Khi một node chết, instance trên node đó phải chờ node sống lại. Hai instance còn lại vẫn phục vụ bình thường |
+| `bootstrap.initdb` | DB `pms`, owner `pms` | Owner là tài khoản mà backend dùng. Role này không phải superuser |
+| `enableSuperuserAccess: false` | Superuser `postgres` không đăng nhập được bằng mật khẩu | Áp dụng nguyên tắc quyền tối thiểu |
+
+Metrics của các instance được Prometheus thu thập qua PodMonitor `helm-chart/monitoring/manifests/cnpg-podmonitor.yaml`.
 
 ## Secret (không nằm trong thư mục này)
 
 Thông tin bí mật **không được lưu trong Git**. Playbook `ansible-k3s/playbooks/06_deploy_helm.yml` đọc Ansible Vault rồi tạo các Secret sau:
 
-- `backend-secret`: `DATABASE_URL`, `ACCESS_TOKEN_SECRET`
-- `postgres-secret`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- `backend-secret`: `DATABASE_URL` (`postgresql://pms:***@pms-db-rw:5432/pms`), `ACCESS_TOKEN_SECRET`
+- `pms-db-app` (loại `kubernetes.io/basic-auth`): `username` = `pms`, `password`. CNPG dùng Secret này để tạo owner của DB
+
+Chỉ chạy riêng các bước tạo Secret: `ansible-playbook playbooks/06_deploy_helm.yml --tags pms-secrets`.
 
 Namespace cũng không nằm trong thư mục này. Nó được tạo bởi playbook 06 hoặc bởi ArgoCD (`CreateNamespace=true`). Nhờ vậy, khi xoá ArgoCD Application, namespace và các Secret ở trên không bị xoá theo.
 

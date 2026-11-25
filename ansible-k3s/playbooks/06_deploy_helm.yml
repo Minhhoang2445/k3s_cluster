@@ -34,12 +34,10 @@
         that:
           - vault_jwt_access_token_secret is defined
           - (vault_jwt_access_token_secret | length) > 0
-          - vault_postgres_user is defined
-          - (vault_postgres_user | length) > 0
           - vault_postgres_password is defined
           - (vault_postgres_password | length) > 0
         fail_msg: >-
-          vault_jwt_access_token_secret, vault_postgres_user and vault_postgres_password
+          vault_jwt_access_token_secret and vault_postgres_password
           must be set in vars/vault.yml (see vars/vault.yml.example).
       no_log: true
       tags: [pms-secrets]
@@ -155,27 +153,6 @@
     # The pms chart does not create secrets (backend.secret.create / database.secret.create = false);
     # it expects these existing secrets.
       tags: [pms-secrets]
-    - name: Ensure {{ pms_postgres_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          {{ k3s_binary_path }} kubectl create secret generic {{ pms_postgres_secret_name }} \
-            --namespace {{ pms_namespace }} \
-            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
-            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-            --from-literal=POSTGRES_DB="$POSTGRES_DB" \
-            --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
-        executable: /bin/bash
-      environment:
-        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
-        POSTGRES_USER: "{{ vault_postgres_user }}"
-        POSTGRES_PASSWORD: "{{ vault_postgres_password }}"
-        POSTGRES_DB: "{{ pms_postgres_db }}"
-      register: postgres_secret_apply
-      changed_when: "'created' in postgres_secret_apply.stdout or 'configured' in postgres_secret_apply.stdout"
-      no_log: true
-      tags: [pms-secrets]
-
     - name: Ensure {{ pms_backend_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
       ansible.builtin.shell:
         cmd: |

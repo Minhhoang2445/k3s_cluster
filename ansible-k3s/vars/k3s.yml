@@ -63,14 +63,11 @@ pms_namespace: "project-management-system"
 pms_manifests_dir: "manifests/pms"
 pms_manifests_remote_dir: "/home/{{ ansible_user }}/pms-manifests"
 pms_backend_secret_name: "backend-secret"
-pms_postgres_secret_name: "postgres-secret"
-pms_postgres_db: "PMS"
-# User, host and database used in DATABASE_URL (backend-secret). They stay on the
-# single Postgres until the CloudNativePG cluster is running and the data is copied;
-# then switch to "{{ pms_cnpg_owner }}" / "{{ pms_cnpg_cluster_name }}-rw" / "pms" and rerun:
-#   ansible-playbook playbooks/06_deploy_helm.yml --tags pms-secrets
-pms_database_user: "{{ vault_postgres_user }}"
-pms_postgres_service: "postgres-service"
+pms_postgres_db: "pms"
+# DATABASE_URL (backend-secret): the database owner of the CloudNativePG cluster,
+# through the "-rw" Service that always points to the current primary.
+pms_database_user: "{{ pms_cnpg_owner }}"
+pms_postgres_service: "{{ pms_cnpg_cluster_name }}-rw"
 pms_postgres_port: 5432
 # CloudNativePG cluster of the PMS database (Cluster CR in manifests/pms)
 pms_cnpg_cluster_name: "pms-db"

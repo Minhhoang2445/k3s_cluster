@@ -10,8 +10,9 @@ vault_worker_become_password: "CHANGE_ME_WORKER_BECOME_PASSWORD"
 # PMS Application Secrets
 vault_jwt_access_token_secret: "CHANGE_ME_JWT_ACCESS_TOKEN_SECRET"
 
-# PostgreSQL credentials (used for postgres-secret and the backend DATABASE_URL)
-vault_postgres_user: "CHANGE_ME_POSTGRES_USER"
+# Password of the PostgreSQL database owner "pms" (pms-db-app secret, used by
+# CloudNativePG and in the backend DATABASE_URL). The owner name is pms_cnpg_owner
+# in vars/k3s.yml.
 vault_postgres_password: "CHANGE_ME_POSTGRES_PASSWORD"
 
 # Grafana admin password (stored in the grafana-admin secret by playbook 07)
