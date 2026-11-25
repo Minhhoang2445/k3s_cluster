@@ -39,6 +39,29 @@ spec:
           operator: Exists
           effect: NoExecute
           tolerationSeconds: 30
+      # Wait until the database primary accepts connections before starting the backend.
+      # Without it, a backend started before pms-db is ready exits ("prisma db push" fails)
+      # and ends up in CrashLoopBackOff with up to 5 minutes between restarts.
+      # pg_isready needs no credentials; the image is the PostgreSQL image of the
+      # CloudNativePG cluster, already pre-pulled on every node by playbook 08.
+      initContainers:
+        - name: wait-for-db
+          image: ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h pms-db-rw -p 5432 -t 2; do
+                echo "waiting for pms-db-rw:5432"
+                sleep 3
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
       containers:
         - name: backend-container
           image: binheo2445/pms_backend:1bfd9646305311b1dd5af6234d334f14905b5d51

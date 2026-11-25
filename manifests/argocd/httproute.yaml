@@ -1,13 +1,6 @@
 # ArgoCD UI through the existing Traefik Gateway (http://argocd.pms.local).
 # Add "<HAProxy/Mac IP or node IP> argocd.pms.local" to /etc/hosts on the client.
-#
-# Prerequisite: argocd-server must serve plain HTTP (TLS is not terminated by
-# Traefik here), otherwise it redirects every request to HTTPS:
-#   kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge \
-#     -p '{"data":{"server.insecure":"true"}}'
-#   kubectl -n argocd rollout restart deployment argocd-server
-#
-# Apply: kubectl apply -f manifests/argocd/httproute.yaml
+# Applied by playbook 09; argocd-server serves plain HTTP (argocd-cmd-params-cm.yaml).
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

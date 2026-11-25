@@ -4,9 +4,10 @@
 # Installs only the operator (CRDs + controller + admission webhook). The PostgreSQL
 # cluster itself is a "Cluster" object in manifests/pms, deployed by playbook 06 / ArgoCD.
 #
-# site.yml runs this playbook BEFORE 06, because manifests/pms needs the Cluster CRD.
-# It therefore installs Helm itself if missing, and enables the operator PodMonitor only
-# when the Prometheus Operator CRDs (playbook 07) exist: rerun it after 07 to enable it.
+# Order in site.yml: 07 (monitoring) -> 08 (this) -> 06 (Traefik + PMS).
+#   - after 07: the PodMonitors of the operator and of pms-db need the Prometheus Operator CRDs
+#   - before 06: manifests/pms contains a CloudNativePG Cluster, which needs the operator CRDs
+# Helm is installed here if missing, because 06 (which also installs it) runs later.
 
 # Play 1: PostgreSQL instances can be scheduled on any node (one per node), so every
 # node pre-pulls the images. Pulling during the Helm install would hit timeouts on a
@@ -95,6 +96,14 @@
       register: podmonitor_crd
       changed_when: false
 
+    - name: Fail if the monitoring stack is not installed yet
+      ansible.builtin.assert:
+        that:
+          - podmonitor_crd.stdout | length > 0
+        fail_msg: >-
+          CRD podmonitors.monitoring.coreos.com not found. Run playbooks/07_deploy_monitoring.yml
+          first (site.yml runs 07 before 08).
+
     - name: Copy CloudNativePG operator values to {{ inventory_hostname }}
       ansible.builtin.copy:
         src: "{{ inventory_dir }}/../../{{ cnpg_values_file }}"
@@ -113,7 +122,6 @@
           --namespace {{ cnpg_namespace }}
           --create-namespace
           -f /home/{{ ansible_user }}/cnpg-values.yaml
-          --set monitoring.podMonitorEnabled={{ (podmonitor_crd.stdout | length > 0) | lower }}
           --atomic
           --wait
           --timeout {{ cnpg_helm_timeout }}
@@ -171,6 +179,24 @@
       delay: 10
       changed_when: false
 
+    - name: Copy CloudNativePG PodMonitors to {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../{{ cnpg_manifests_dir }}/"
+        dest: "/home/{{ ansible_user }}/cnpg-manifests/"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        directory_mode: "0755"
+
+    # Can be applied before the Cluster exists: Prometheus starts scraping once the pods appear.
+    - name: Apply CloudNativePG PodMonitors
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl apply -f /home/{{ ansible_user }}/cnpg-manifests/"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: cnpg_manifests_apply
+      changed_when: "'created' in cnpg_manifests_apply.stdout or 'configured' in cnpg_manifests_apply.stdout"
+
     - name: Read the running operator version
       ansible.builtin.command:
         cmd: >
@@ -186,5 +212,5 @@
       ansible.builtin.debug:
         msg:
           - "Operator image: {{ cnpg_running_image.stdout }}"
-          - "Operator PodMonitor: {{ 'enabled' if podmonitor_crd.stdout | length > 0 else 'disabled (run playbook 07, then rerun this playbook)' }}"
-          - "Next: add the Cluster object to manifests/pms (PostgreSQL image {{ cnpg_postgres_image }})"
+          - "PodMonitors: operator (chart) + {{ cnpg_manifests_dir }}"
+          - "PostgreSQL image pre-pulled: {{ cnpg_postgres_image }}"

@@ -219,3 +219,45 @@
         KUBECONFIG: "{{ k3s_kubeconfig_path }}"
       register: pms_apply_result
       changed_when: "'created' in pms_apply_result.stdout or 'configured' in pms_apply_result.stdout"
+
+    # ------------------------------------------------------------- Verify PMS
+    # A new CloudNativePG cluster needs a few minutes (instances are created one by one).
+    # The backend waits for it in its "wait-for-db" initContainer.
+    - name: Wait until the CloudNativePG cluster {{ pms_cnpg_cluster_name }} is ready
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ pms_namespace }} wait
+          --for=condition=Ready cluster.postgresql.cnpg.io/{{ pms_cnpg_cluster_name }}
+          --timeout=900s
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait until the PMS backend and frontend are rolled out
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ pms_namespace }} rollout status
+          deployment/{{ item }} --timeout=600s
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      loop:
+        - backend-deployment
+        - frontend-deployment
+      changed_when: false
+
+    # Through svclb -> Traefik -> Gateway -> HTTPRoute on this node:
+    #   /             -> frontend (200)
+    #   /api/user/me  -> backend, which rejects the request without a token (401)
+    - name: Check PMS through the Traefik Gateway on {{ ansible_host }}
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host }}{{ item.path }}"
+        status_code: "{{ item.status }}"
+      loop:
+        - { path: "/", status: 200 }
+        - { path: "/api/user/me", status: 401 }
+      loop_control:
+        label: "{{ item.path }} -> {{ item.status }}"
+      register: pms_http_check
+      retries: 12
+      delay: 10
+      until: pms_http_check.status == item.status

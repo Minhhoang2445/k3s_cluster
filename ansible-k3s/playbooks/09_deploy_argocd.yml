@@ -1,0 +1,272 @@
+---
+# Stage 9: ArgoCD (GitOps for the PMS application).
+#
+#   Play 1 - Download the pinned official install.yaml and list the images it uses
+#   Play 2 - Pre-pull those images on every node (slow networks would otherwise time out)
+#   Play 3 - Install ArgoCD, apply the tuning manifests (manifests/argocd), restart what needs it,
+#            create the Applications (argoCD/*.yaml) and wait until they are Synced/Healthy
+#
+# Runs last in site.yml: the ArgoCD HTTPRoute needs the PMS Gateway (playbook 06), and the
+# pms Application takes over the manifests that playbook 06 has already applied.
+# Infrastructure (Traefik, monitoring, CloudNativePG) stays managed by Ansible; ArgoCD only
+# manages the application (manifests/pms).
+
+- name: Download ArgoCD {{ argocd_version }} install manifest and resolve required images
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  vars:
+    argocd_work_dir: "/home/{{ ansible_user }}/argocd"
+
+  tasks:
+    - name: Ensure ArgoCD work directory exists
+      ansible.builtin.file:
+        path: "{{ argocd_work_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0755"
+
+    - name: Download ArgoCD {{ argocd_version }} install.yaml
+      ansible.builtin.get_url:
+        url: "{{ argocd_install_url }}"
+        dest: "{{ argocd_work_dir }}/install.yaml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        timeout: 120
+      register: argocd_download
+      retries: 3
+      delay: 15
+      until: argocd_download is succeeded
+
+    - name: Read ArgoCD install.yaml
+      ansible.builtin.slurp:
+        src: "{{ argocd_work_dir }}/install.yaml"
+      register: argocd_install_manifest
+
+    - name: Resolve images used by ArgoCD
+      ansible.builtin.set_fact:
+        argocd_images: >-
+          {{ (argocd_install_manifest.content | b64decode)
+             | regex_findall('image:\s*"?([^"\s]+)')
+             | unique | sort }}
+
+    - name: Show images required by ArgoCD
+      ansible.builtin.debug:
+        var: argocd_images
+
+
+# ArgoCD pods can be scheduled on any node.
+- name: Pre-pull ArgoCD images on cluster nodes
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Check which ArgoCD images are already present on {{ inventory_hostname }}
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl inspecti {{ item }}"
+      loop: "{{ hostvars['k3s-1'].argocd_images }}"
+      register: argocd_image_present
+      changed_when: false
+      failed_when: false
+
+    - name: Pull missing ArgoCD images on {{ inventory_hostname }} (can take a long time on slow networks)
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl pull {{ item.item }}"
+      loop: "{{ argocd_image_present.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc != 0
+      register: argocd_image_pull
+      retries: 3
+      delay: 15
+      until: argocd_image_pull.rc == 0
+
+
+- name: Deploy ArgoCD and the PMS Application on K3s control plane
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  vars:
+    argocd_work_dir: "/home/{{ ansible_user }}/argocd"
+    # Field manager for our tuning manifests (server-side apply keeps them separate
+    # from the fields owned by install.yaml).
+    argocd_field_manager: "ansible-argocd-tuning"
+    argocd_workloads:
+      - deployment/argocd-server
+      - deployment/argocd-repo-server
+      - deployment/argocd-redis
+      - deployment/argocd-dex-server
+      - deployment/argocd-applicationset-controller
+      - deployment/argocd-notifications-controller
+      - statefulset/argocd-application-controller
+
+  tasks:
+    - name: Wait until the Kubernetes API server is ready
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw /readyz"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: apiserver_ready
+      until: apiserver_ready.rc == 0 and apiserver_ready.stdout == "ok"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Ensure namespace {{ argocd_namespace }} exists
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create namespace {{ argocd_namespace }} --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: argocd_ns_apply
+      changed_when: "'created' in argocd_ns_apply.stdout or 'configured' in argocd_ns_apply.stdout"
+
+    # Server-side apply: the ArgoCD CRDs are too large for the client-side
+    # last-applied-configuration annotation. --force-conflicts takes over fields
+    # previously applied client-side.
+    - name: Install or upgrade ArgoCD {{ argocd_version }} (official install.yaml, server-side)
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl apply --server-side --force-conflicts
+          -n {{ argocd_namespace }} -f {{ argocd_work_dir }}/install.yaml
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: argocd_install_apply
+      retries: 3
+      delay: 20
+      until: argocd_install_apply.rc == 0
+      changed_when: "'serverside-applied' in argocd_install_apply.stdout"
+
+    - name: Copy ArgoCD tuning manifests and Applications to {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../{{ item.src }}"
+        dest: "{{ argocd_work_dir }}/{{ item.dest }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+        directory_mode: "0755"
+      loop:
+        - { src: "{{ argocd_manifests_dir }}/", dest: "manifests/" }
+        - { src: "argoCD/", dest: "applications/" }
+      loop_control:
+        label: "{{ item.src }}"
+
+    - name: Read argocd-cmd-params-cm before applying the tuning manifests
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} get configmap argocd-cmd-params-cm -o jsonpath={.data}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: argocd_params_before
+      changed_when: false
+
+    # argocd-cmd-params-cm.yaml, argocd-repo-server-env.yaml (partial Deployment) and the
+    # HTTPRoute. A change to the repo-server env rolls that Deployment out by itself.
+    - name: Apply ArgoCD tuning manifests (server-side)
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl apply --server-side --force-conflicts
+          --field-manager={{ argocd_field_manager }}
+          -f {{ argocd_work_dir }}/manifests/
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      changed_when: false
+
+    - name: Read argocd-cmd-params-cm after applying the tuning manifests
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} get configmap argocd-cmd-params-cm -o jsonpath={.data}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: argocd_params_after
+      changed_when: false
+
+    # ArgoCD reads argocd-cmd-params-cm only at startup.
+    - name: Restart ArgoCD components that read argocd-cmd-params-cm
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} rollout restart
+          deployment/argocd-server deployment/argocd-repo-server statefulset/argocd-application-controller
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      when: argocd_params_before.stdout != argocd_params_after.stdout
+      changed_when: true
+
+    - name: Wait until ArgoCD components are rolled out
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} rollout status {{ item }} --timeout=600s"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      loop: "{{ argocd_workloads }}"
+      changed_when: false
+
+    - name: Create or update ArgoCD Applications
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl apply -f {{ argocd_work_dir }}/applications/{{ item | basename }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      loop: "{{ argocd_applications }}"
+      register: argocd_app_apply
+      changed_when: "'created' in argocd_app_apply.stdout or 'configured' in argocd_app_apply.stdout"
+
+    - name: Read the Application names
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl apply --dry-run=client -o jsonpath={.metadata.name}
+          -f {{ argocd_work_dir }}/applications/{{ item | basename }}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      loop: "{{ argocd_applications }}"
+      register: argocd_app_names
+      changed_when: false
+
+    # The first sync clones the repository, which can take minutes on a slow network.
+    - name: Wait until every Application is Synced and Healthy
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} get application {{ item.stdout }}
+          -o jsonpath={.status.sync.status}/{.status.health.status}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      loop: "{{ argocd_app_names.results }}"
+      loop_control:
+        label: "{{ item.stdout }}"
+      register: argocd_app_status
+      until: argocd_app_status.stdout == "Synced/Healthy"
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Read ArgoCD hostname from its HTTPRoute
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl -n {{ argocd_namespace }} get httproute argocd -o jsonpath={.spec.hostnames[0]}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: argocd_hostname
+      changed_when: false
+
+    - name: Show how to access ArgoCD
+      ansible.builtin.debug:
+        msg:
+          - "Applications: {{ argocd_app_status.results | map(attribute='item.stdout') | join(', ') }} are Synced/Healthy"
+          - "UI: http://{{ argocd_hostname.stdout }} (add '<node or HAProxy IP> {{ argocd_hostname.stdout }}' to /etc/hosts)"
+          - "User: admin. Initial password:"
+          - "  kubectl -n {{ argocd_namespace }} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"

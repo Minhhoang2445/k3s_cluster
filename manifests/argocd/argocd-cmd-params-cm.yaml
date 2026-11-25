@@ -1,0 +1,20 @@
+# Tuning of the ArgoCD install (playbook 09 applies it with server-side apply after
+# the official install.yaml, which ships this ConfigMap empty).
+#
+#   server.insecure: argocd-server serves plain HTTP. TLS is not terminated by Traefik
+#     here, so without it argocd-server redirects every request to HTTPS and the
+#     HTTPRoute (httproute.yaml) cannot be used.
+#   *.repo.server.timeout.seconds: the repo-server clones the Git repository; on a slow
+#     network the default 60s timeout fails with "DeadlineExceeded".
+#
+# Changing a value requires restarting argocd-server, argocd-repo-server and
+# argocd-application-controller (playbook 09 does it when this file changes).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  server.insecure: "true"
+  server.repo.server.timeout.seconds: "300"
+  controller.repo.server.timeout.seconds: "300"

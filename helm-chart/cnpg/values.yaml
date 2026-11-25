@@ -14,7 +14,7 @@ resources:
   limits:
     memory: 256Mi
 
-# Operator metrics. PodMonitor needs the Prometheus Operator CRDs (playbook 07):
-# playbook 08 overrides this with --set, true only when the CRD exists.
+# Operator metrics. The PodMonitor CRD comes from kube-prometheus-stack
+# (playbook 07), which site.yml runs before playbook 08.
 monitoring:
-  podMonitorEnabled: false
+  podMonitorEnabled: true

@@ -1,0 +1,19 @@
+# Partial object, applied with server-side apply on top of the official install.yaml:
+# it only adds one environment variable to the argocd-repo-server container and
+# leaves the rest of the Deployment as installed.
+#
+#   ARGOCD_EXEC_TIMEOUT: timeout of the git/helm commands run by the repo-server
+#     (default 90s). A clone on a slow network takes longer than that.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argocd-repo-server
+  namespace: argocd
+spec:
+  template:
+    spec:
+      containers:
+        - name: argocd-repo-server
+          env:
+            - name: ARGOCD_EXEC_TIMEOUT
+              value: "5m"

@@ -87,6 +87,8 @@ cnpg_operator_image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.2"
 # Default PostgreSQL image of operator 1.30.2; pinned in the Cluster CR as well
 cnpg_postgres_image: "ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie"
 cnpg_values_file: "helm-chart/cnpg/values.yaml"
+# PodMonitors of the PostgreSQL clusters (applied by playbook 08)
+cnpg_manifests_dir: "helm-chart/cnpg/manifests"
 cnpg_helm_timeout: "10m"
 
 # Monitoring (kube-prometheus-stack, installed by playbook 07)
@@ -105,3 +107,13 @@ monitoring_helm_timeout: "20m"
 # K3s server config file used to enable etcd metrics (merged with CLI flags)
 k3s_config_file: "/etc/rancher/k3s/config.yaml"
 k3s_etcd_metrics_port: 2381
+
+# ArgoCD (installed by playbook 09 from the official manifest; GitOps for the PMS app)
+argocd_version: "v3.6.1"
+argocd_namespace: "argocd"
+argocd_install_url: "https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml"
+# Tuning of the ArgoCD install (ConfigMap, repo-server env) and its HTTPRoute
+argocd_manifests_dir: "manifests/argocd"
+# ArgoCD Applications created by playbook 09
+argocd_applications:
+  - "argoCD/pms-application.yaml"

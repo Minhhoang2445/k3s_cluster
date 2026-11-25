@@ -15,12 +15,13 @@
 # Stage 5: Verify the 5-node cluster and 3-node embedded etcd HA membership
 - import_playbook: playbooks/05_verify_cluster.yml
 
-# Stage 8 runs before 6: the PMS manifests contain a CloudNativePG Cluster, which
-# needs the operator's CRDs and webhook. (Numbered 08 because it was added last.)
-- import_playbook: playbooks/08_deploy_cnpg.yml
-
-# Stage 6: Deploy Traefik (Helm) and the PMS application (plain manifests)
-- import_playbook: playbooks/06_deploy_helm.yml
-
-# Stage 7: Deploy monitoring (Prometheus, Grafana, Alertmanager) and expose etcd metrics
+# Stages 7, 8 and 6 run in dependency order, not in numeric order:
+#   7  monitoring       Prometheus Operator CRDs (needed by the CNPG PodMonitors),
+#                       Gateway API CRDs if missing (Grafana HTTPRoute)
+#   8  CloudNativePG    operator + PodMonitors (CRDs needed by the Cluster in manifests/pms)
+#   6  Traefik + PMS    Traefik (Helm, HA values), secrets from the Vault, PMS manifests
+#   9  ArgoCD           GitOps for manifests/pms (needs the PMS Gateway for its HTTPRoute)
 - import_playbook: playbooks/07_deploy_monitoring.yml
+- import_playbook: playbooks/08_deploy_cnpg.yml
+- import_playbook: playbooks/06_deploy_helm.yml
+- import_playbook: playbooks/09_deploy_argocd.yml

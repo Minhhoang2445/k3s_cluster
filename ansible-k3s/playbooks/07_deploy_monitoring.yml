@@ -4,6 +4,9 @@
 #   Play 2 - Download the kube-prometheus-stack chart and work out which images it needs
 #   Play 3 - Pre-pull those images on the nodes (slow networks would otherwise time out helm --wait)
 #   Play 4 - Install CRDs + chart, Traefik ServiceMonitor, Grafana HTTPRoute, then verify targets
+#
+# Order in site.yml: 07 runs before 08 (CNPG PodMonitors need its CRDs) and 06 (Traefik).
+# It therefore installs Helm and the Gateway API CRDs itself when they are missing.
 
 - name: Expose embedded etcd metrics on K3s HA servers (rolling, one server at a time)
   hosts: k3s_servers
@@ -84,10 +87,23 @@
     monitoring_chart_dir: "{{ monitoring_work_dir }}/{{ monitoring_chart_name }}"
 
   tasks:
-    - name: Check that Helm is installed (playbook 06 installs it)
+    # site.yml runs this playbook before 06, so install the pinned Helm here if missing.
+    - name: Check installed Helm version if present
       ansible.builtin.command:
-        cmd: "{{ helm_bin_path }} version --short"
+        cmd: "{{ helm_bin_path }} version --template='{{ '{{' }}.Version{{ '}}' }}'"
+      register: helm_installed_version
       changed_when: false
+      failed_when: false
+
+    - name: Install pinned Helm 3 ({{ helm_version }}) for {{ ansible_facts['architecture'] }}
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          curl -fsSL {{ helm_install_script_url }} | bash
+        executable: /bin/bash
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+      when: helm_installed_version.rc != 0 or helm_installed_version.stdout != helm_version
 
     - name: Validate monitoring node {{ monitoring_node }} exists in the cluster
       ansible.builtin.command:
@@ -337,6 +353,30 @@
       until: monitoring_deploy_result.rc == 0
       changed_when: "'has been upgraded' in monitoring_deploy_result.stdout or 'has been installed' in monitoring_deploy_result.stdout"
 
+    # The Grafana HTTPRoute needs the Gateway API CRDs. site.yml runs this playbook before
+    # Traefik (06), so install the pinned standard CRDs here if they are missing; the Traefik
+    # chart then skips the CRDs that already exist.
+    - name: Check whether Gateway API CRDs are installed
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get crd httproutes.gateway.networking.k8s.io --ignore-not-found -o name"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: gateway_crd
+      changed_when: false
+
+    - name: Install Kubernetes Gateway API standard CRDs ({{ gateway_api_version }}) if missing
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl apply --server-side -f {{ gateway_api_crd_url }}"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      when: gateway_crd.stdout | length == 0
+      register: gateway_crd_install
+      retries: 3
+      delay: 15
+      until: gateway_crd_install.rc == 0
+
+    # The Traefik ServiceMonitor and the Grafana HTTPRoute may be created before Traefik and
+    # the PMS Gateway exist: they take effect as soon as those appear.
     - name: Apply Traefik ServiceMonitor and Grafana HTTPRoute
       ansible.builtin.command:
         cmd: "{{ k3s_binary_path }} kubectl apply -f {{ monitoring_work_dir }}/manifests/"
