@@ -31,3 +31,6 @@ out/
 Thumbs.db
 
 locust-venv/
+haproxy/
+
+*.csv
