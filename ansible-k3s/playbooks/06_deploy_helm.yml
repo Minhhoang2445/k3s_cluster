@@ -42,6 +42,7 @@
           vault_jwt_access_token_secret, vault_postgres_user and vault_postgres_password
           must be set in vars/vault.yml (see vars/vault.yml.example).
       no_log: true
+      tags: [pms-secrets]
 
     - name: Check installed Helm version if present
       ansible.builtin.command:
@@ -153,6 +154,7 @@
 
     # The pms chart does not create secrets (backend.secret.create / database.secret.create = false);
     # it expects these existing secrets.
+      tags: [pms-secrets]
     - name: Ensure {{ pms_postgres_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
       ansible.builtin.shell:
         cmd: |
@@ -172,6 +174,7 @@
       register: postgres_secret_apply
       changed_when: "'created' in postgres_secret_apply.stdout or 'configured' in postgres_secret_apply.stdout"
       no_log: true
+      tags: [pms-secrets]
 
     - name: Ensure {{ pms_backend_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
       ansible.builtin.shell:
@@ -186,11 +189,33 @@
       environment:
         KUBECONFIG: "{{ k3s_kubeconfig_path }}"
         DATABASE_URL: >-
-          postgresql://{{ vault_postgres_user | urlencode | replace('/', '%2F') }}:{{ vault_postgres_password | urlencode | replace('/', '%2F') }}@{{ pms_postgres_service }}:{{ pms_postgres_port }}/{{ pms_postgres_db }}?schema=public
+          postgresql://{{ pms_database_user | urlencode | replace('/', '%2F') }}:{{ vault_postgres_password | urlencode | replace('/', '%2F') }}@{{ pms_postgres_service }}:{{ pms_postgres_port }}/{{ pms_postgres_db }}?schema=public
         JWT_SECRET: "{{ vault_jwt_access_token_secret }}"
       register: backend_secret_apply
       changed_when: "'created' in backend_secret_apply.stdout or 'configured' in backend_secret_apply.stdout"
       no_log: true
+      tags: [pms-secrets]
+
+    # Owner of the application database in the CloudNativePG cluster (bootstrap.initdb.secret).
+    # CNPG requires a kubernetes.io/basic-auth secret with "username" and "password".
+    - name: Ensure {{ pms_cnpg_app_secret_name }} secret exists in {{ pms_namespace }} from Ansible Vault
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ k3s_binary_path }} kubectl create secret generic {{ pms_cnpg_app_secret_name }} \
+            --namespace {{ pms_namespace }} \
+            --type kubernetes.io/basic-auth \
+            --from-literal=username="{{ pms_cnpg_owner }}" \
+            --from-literal=password="$DB_PASSWORD" \
+            --dry-run=client -o yaml | {{ k3s_binary_path }} kubectl apply -f -
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+        DB_PASSWORD: "{{ vault_postgres_password }}"
+      register: cnpg_app_secret_apply
+      changed_when: "'created' in cnpg_app_secret_apply.stdout or 'configured' in cnpg_app_secret_apply.stdout"
+      no_log: true
+      tags: [pms-secrets]
 
     # The PMS application is plain Kubernetes YAML (manifests/pms), applied with kubectl.
     # The target directory is recreated so files removed from the repo do not linger.

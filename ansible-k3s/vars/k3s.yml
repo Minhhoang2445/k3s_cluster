@@ -65,8 +65,32 @@ pms_manifests_remote_dir: "/home/{{ ansible_user }}/pms-manifests"
 pms_backend_secret_name: "backend-secret"
 pms_postgres_secret_name: "postgres-secret"
 pms_postgres_db: "PMS"
+# User, host and database used in DATABASE_URL (backend-secret). They stay on the
+# single Postgres until the CloudNativePG cluster is running and the data is copied;
+# then switch to "{{ pms_cnpg_owner }}" / "{{ pms_cnpg_cluster_name }}-rw" / "pms" and rerun:
+#   ansible-playbook playbooks/06_deploy_helm.yml --tags pms-secrets
+pms_database_user: "{{ vault_postgres_user }}"
 pms_postgres_service: "postgres-service"
 pms_postgres_port: 5432
+# CloudNativePG cluster of the PMS database (Cluster CR in manifests/pms)
+pms_cnpg_cluster_name: "pms-db"
+# kubernetes.io/basic-auth secret (username/password) for the database owner.
+# The owner name is not secret and must match "owner" in manifests/pms/database/cnpg-cluster.yaml;
+# the password comes from the Vault (vault_postgres_password).
+pms_cnpg_app_secret_name: "pms-db-app"
+pms_cnpg_owner: "pms"
+
+# CloudNativePG operator (installed by playbook 08)
+cnpg_namespace: "cnpg-system"
+cnpg_release_name: "cnpg"
+cnpg_chart_repo: "https://cloudnative-pg.github.io/charts"
+cnpg_chart_name: "cloudnative-pg"
+cnpg_chart_version: "0.29.2"          # operator 1.30.2
+cnpg_operator_image: "ghcr.io/cloudnative-pg/cloudnative-pg:1.30.2"
+# Default PostgreSQL image of operator 1.30.2; pinned in the Cluster CR as well
+cnpg_postgres_image: "ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie"
+cnpg_values_file: "helm-chart/cnpg/values.yaml"
+cnpg_helm_timeout: "10m"
 
 # Monitoring (kube-prometheus-stack, installed by playbook 07)
 monitoring_namespace: "monitoring"

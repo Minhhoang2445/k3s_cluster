@@ -1,0 +1,190 @@
+---
+# Stage 8: CloudNativePG operator (PostgreSQL HA).
+#
+# Installs only the operator (CRDs + controller + admission webhook). The PostgreSQL
+# cluster itself is a "Cluster" object in manifests/pms, deployed by playbook 06 / ArgoCD.
+#
+# site.yml runs this playbook BEFORE 06, because manifests/pms needs the Cluster CRD.
+# It therefore installs Helm itself if missing, and enables the operator PodMonitor only
+# when the Prometheus Operator CRDs (playbook 07) exist: rerun it after 07 to enable it.
+
+# Play 1: PostgreSQL instances can be scheduled on any node (one per node), so every
+# node pre-pulls the images. Pulling during the Helm install would hit timeouts on a
+# slow network.
+- name: Pre-pull CloudNativePG images on cluster nodes
+  hosts: k3s_cluster
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/k3s_workers.yml
+    - ../vars/vault.yml
+
+  vars:
+    cnpg_images:
+      - "{{ cnpg_operator_image }}"
+      - "{{ cnpg_postgres_image }}"
+
+  tasks:
+    - name: Check which CloudNativePG images are already present on {{ inventory_hostname }}
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl inspecti {{ item }}"
+      loop: "{{ cnpg_images }}"
+      register: cnpg_image_present
+      changed_when: false
+      failed_when: false
+
+    - name: Pull missing CloudNativePG images on {{ inventory_hostname }} (can take a long time on slow networks)
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} crictl pull {{ item.item }}"
+      loop: "{{ cnpg_image_present.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc != 0
+      register: cnpg_image_pull
+      retries: 3
+      delay: 15
+      until: cnpg_image_pull.rc == 0
+
+
+# Play 2: install the operator with Helm and verify it accepts Cluster objects.
+- name: Deploy CloudNativePG operator on K3s control plane
+  hosts: k3s-1
+  become: true
+  vars_files:
+    - ../vars/k3s.yml
+    - ../vars/k3s_cluster.yml
+    - ../vars/k3s_servers.yml
+    - ../vars/vault.yml
+
+  tasks:
+    - name: Check installed Helm version if present
+      ansible.builtin.command:
+        cmd: "{{ helm_bin_path }} version --template='{{ '{{' }}.Version{{ '}}' }}'"
+      register: helm_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install pinned Helm 3 ({{ helm_version }}) for {{ ansible_facts['architecture'] }}
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          curl -fsSL {{ helm_install_script_url }} | bash
+        executable: /bin/bash
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+      when: helm_installed_version.rc != 0 or helm_installed_version.stdout != helm_version
+
+    - name: Wait until the Kubernetes API server is ready
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get --raw /readyz"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: apiserver_ready
+      until: apiserver_ready.rc == 0 and apiserver_ready.stdout == "ok"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Check whether the Prometheus Operator PodMonitor CRD exists (playbook 07)
+      ansible.builtin.command:
+        cmd: "{{ k3s_binary_path }} kubectl get crd podmonitors.monitoring.coreos.com --ignore-not-found -o name"
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: podmonitor_crd
+      changed_when: false
+
+    - name: Copy CloudNativePG operator values to {{ inventory_hostname }}
+      ansible.builtin.copy:
+        src: "{{ inventory_dir }}/../../{{ cnpg_values_file }}"
+        dest: "/home/{{ ansible_user }}/cnpg-values.yaml"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+
+    # --atomic rolls a failed attempt back so the retry starts from a clean state.
+    - name: Deploy or upgrade CloudNativePG {{ cnpg_chart_version }} using Helm
+      ansible.builtin.command:
+        cmd: >
+          {{ helm_bin_path }} upgrade --install {{ cnpg_release_name }} {{ cnpg_chart_name }}
+          --repo {{ cnpg_chart_repo }}
+          --version {{ cnpg_chart_version }}
+          --namespace {{ cnpg_namespace }}
+          --create-namespace
+          -f /home/{{ ansible_user }}/cnpg-values.yaml
+          --set monitoring.podMonitorEnabled={{ (podmonitor_crd.stdout | length > 0) | lower }}
+          --atomic
+          --wait
+          --timeout {{ cnpg_helm_timeout }}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: cnpg_deploy_result
+      retries: 2
+      delay: 30
+      until: cnpg_deploy_result.rc == 0
+      changed_when: "'has been upgraded' in cnpg_deploy_result.stdout or 'has been installed' in cnpg_deploy_result.stdout"
+
+    - name: Wait until the CloudNativePG CRDs are established
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl wait --for=condition=Established --timeout=120s
+          crd/clusters.postgresql.cnpg.io crd/poolers.postgresql.cnpg.io
+          crd/backups.postgresql.cnpg.io crd/scheduledbackups.postgresql.cnpg.io
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      changed_when: false
+
+    - name: Wait until the CloudNativePG operator deployment is available
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ cnpg_namespace }} rollout status
+          deployment/{{ cnpg_release_name }}-{{ cnpg_chart_name }} --timeout=300s
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      changed_when: false
+
+    # A Cluster object is validated by the operator's admission webhook. Creating one
+    # right after the install can fail while the webhook is still starting, so check
+    # with a server-side dry run (nothing is created).
+    - name: Wait until the operator webhook accepts Cluster objects (server-side dry run)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          cat <<'EOF' | {{ k3s_binary_path }} kubectl apply --dry-run=server -f -
+          apiVersion: postgresql.cnpg.io/v1
+          kind: Cluster
+          metadata:
+            name: webhook-check
+            namespace: {{ cnpg_namespace }}
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+          EOF
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: cnpg_webhook_check
+      until: cnpg_webhook_check.rc == 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Read the running operator version
+      ansible.builtin.command:
+        cmd: >
+          {{ k3s_binary_path }} kubectl -n {{ cnpg_namespace }} get deployment
+          {{ cnpg_release_name }}-{{ cnpg_chart_name }}
+          -o jsonpath={.spec.template.spec.containers[0].image}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: cnpg_running_image
+      changed_when: false
+
+    - name: Show CloudNativePG operator status
+      ansible.builtin.debug:
+        msg:
+          - "Operator image: {{ cnpg_running_image.stdout }}"
+          - "Operator PodMonitor: {{ 'enabled' if podmonitor_crd.stdout | length > 0 else 'disabled (run playbook 07, then rerun this playbook)' }}"
+          - "Next: add the Cluster object to manifests/pms (PostgreSQL image {{ cnpg_postgres_image }})"

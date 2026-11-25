@@ -1,0 +1,20 @@
+# Values for cloudnative-pg/cloudnative-pg 0.29.2 (operator 1.30.2), installed by playbook 08.
+# Only the operator is installed here; the PostgreSQL cluster itself is a "Cluster"
+# object in manifests/pms.
+
+# CRDs (Cluster, Backup, Pooler, ...) are templates of this chart, so helm upgrade
+# also upgrades them.
+crds:
+  create: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# Operator metrics. PodMonitor needs the Prometheus Operator CRDs (playbook 07):
+# playbook 08 overrides this with --set, true only when the CRD exists.
+monitoring:
+  podMonitorEnabled: false

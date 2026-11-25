@@ -1,0 +1,62 @@
+# PostgreSQL HA managed by the CloudNativePG operator (installed by playbook 08).
+#
+#   pms-db-1, pms-db-2, pms-db-3: 1 primary + 2 standbys, one per node
+#   Streaming replication is ASYNCHRONOUS (no "synchronous" section): a commit only
+#   waits for the primary's own disk, so standbys never slow down writes. The price
+#   is that the last transactions not yet streamed can be lost on a primary crash.
+#
+# Services created by the operator (the application uses -rw):
+#   pms-db-rw  -> current primary (follows failovers)   reads + writes
+#   pms-db-ro  -> standbys only                          read-only
+#   pms-db-r   -> any instance                           read-only
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: pms-db
+  namespace: project-management-system
+spec:
+  instances: 3
+  # Default image of operator 1.30.2, pinned so every instance runs the same version
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie
+
+  # Rolling updates: standbys are updated first, then the operator switches the
+  # primary role to an updated standby (switchover) and updates the old primary.
+  primaryUpdateStrategy: unsupervised
+
+  # No password-based login for the "postgres" superuser
+  enableSuperuserAccess: false
+
+  # Created once, when the cluster is first initialized. Owner credentials come from
+  # the kubernetes.io/basic-auth Secret created by Ansible (playbook 06) from the Vault.
+  bootstrap:
+    initdb:
+      database: pms
+      owner: admin          # = pms_cnpg_owner (vars/k3s.yml), username in pms-db-app
+      secret:
+        name: pms-db-app
+
+  # One PVC per instance on the local disk of its node. If a node dies, its
+  # instance waits for the node; the other two keep serving (a standby is promoted
+  # if the primary was on that node).
+  storage:
+    storageClass: local-path
+    size: 5Gi
+
+  # At most one instance per node, so a single node failure never takes down more
+  # than one instance.
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+  postgresql:
+    parameters:
+      shared_buffers: 256MB
+      max_connections: "100"

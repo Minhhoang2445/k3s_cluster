@@ -1,0 +1,21 @@
+# Scrapes the PostgreSQL instances of the CloudNativePG cluster "pms-db"
+# (port "metrics" = 9187 on every instance pod: replication lag, connections, WAL, ...).
+# Created here instead of Cluster.spec.monitoring.enablePodMonitor, which is
+# deprecated in operator 1.30, and because PodMonitor needs the Prometheus Operator
+# CRDs that only exist after playbook 07.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pms-db
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - project-management-system
+  selector:
+    matchLabels:
+      cnpg.io/cluster: pms-db
+      cnpg.io/podRole: instance
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
