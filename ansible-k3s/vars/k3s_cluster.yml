@@ -1,25 +1,22 @@
 ---
 # Stage 1 Bootstrap Server (Initial embedded etcd member)
+# IPs are read from the inventory (inventory/hosts.ini), so changing a node IP only
+# needs an edit there.
 k3s_bootstrap_host: "k3s-1"
-k3s_bootstrap_ip: "192.168.64.6"
+k3s_bootstrap_ip: "{{ hostvars[k3s_bootstrap_host].ansible_host }}"
 
 # K3s API Endpoint
-# In the initial lab, this points to the bootstrap server IP (192.168.64.6).
-# To transition to a stable Virtual IP (e.g., kube-vip/keepalived) or Load Balancer later,
-# update k3s_api_endpoint to the VIP/LB address without changing playbook logic.
-k3s_api_endpoint: "192.168.64.6"
+# Points to the bootstrap server IP. To move to a stable Virtual IP (kube-vip/keepalived)
+# or a load balancer later, set k3s_api_endpoint to that address; the playbook logic stays the same.
+k3s_api_endpoint: "{{ k3s_bootstrap_ip }}"
 k3s_api_port: 6443
 
-# TLS Subject Alternative Names (SANs) embedded in the K3s API Server certificate
-# Includes the API endpoint, all 3 HA control-plane server IPs, and server hostnames.
-k3s_tls_san:
-  - "{{ k3s_api_endpoint }}"
-  - "192.168.64.6"
-  - "192.168.64.7"
-  - "192.168.64.8"
-  - "k3s-1"
-  - "k3s-2"
-  - "k3s-3"
+# TLS Subject Alternative Names (SANs) embedded in the K3s API Server certificate:
+# the API endpoint, the IP and hostname of every control-plane server.
+k3s_tls_san: >-
+  {{ [k3s_api_endpoint]
+     + (groups['k3s_servers'] | map('extract', hostvars, 'ansible_host') | list)
+     + groups['k3s_servers'] }}
 
 # Cluster Network CIDRs
 pod_network_cidr: "10.42.0.0/16"

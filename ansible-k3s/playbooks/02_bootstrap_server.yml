@@ -55,6 +55,31 @@
     - name: Gather service facts to inspect actual K3s service state
       ansible.builtin.service_facts:
 
+    # etcd timeouts and snapshot schedule (vars/k3s_servers.yml). Written before the install
+    # so a new server starts with them; an existing server is restarted below when they change.
+    - name: Ensure K3s config drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ k3s_etcd_config_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write etcd tuning config ({{ k3s_etcd_config_file }})
+      ansible.builtin.copy:
+        dest: "{{ k3s_etcd_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (vars/k3s_servers.yml)
+          etcd-arg:
+            - "heartbeat-interval={{ k3s_etcd_heartbeat_interval_ms }}"
+            - "election-timeout={{ k3s_etcd_election_timeout_ms }}"
+          etcd-snapshot-schedule-cron: "{{ k3s_etcd_snapshot_cron }}"
+          etcd-snapshot-retention: {{ k3s_etcd_snapshot_retention }}
+      register: k3s_etcd_tuning
+
     - name: Initialize K3s HA server with embedded etcd (--cluster-init) on k3s-1
       ansible.builtin.command:
         cmd: >
@@ -81,6 +106,15 @@
         enabled: true
         state: started
       register: k3s_bootstrap_systemd
+
+    - name: Restart K3s server on {{ inventory_hostname }} to apply the new etcd tuning
+      ansible.builtin.systemd:
+        name: "{{ k3s_server_service_name }}"
+        state: restarted
+      when:
+        - k3s_etcd_tuning.changed
+        - k3s_server_unit.stat.exists
+      register: k3s_bootstrap_restart
 
     - name: Verify K3s server service is actively running
       ansible.builtin.assert:

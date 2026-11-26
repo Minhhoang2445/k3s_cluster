@@ -111,6 +111,31 @@
         state: started
         timeout: 30
 
+    # etcd timeouts and snapshot schedule (vars/k3s_servers.yml). Written before the install
+    # so a new server starts with them; an existing server is restarted below when they change.
+    - name: Ensure K3s config drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ k3s_etcd_config_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write etcd tuning config ({{ k3s_etcd_config_file }})
+      ansible.builtin.copy:
+        dest: "{{ k3s_etcd_config_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (vars/k3s_servers.yml)
+          etcd-arg:
+            - "heartbeat-interval={{ k3s_etcd_heartbeat_interval_ms }}"
+            - "election-timeout={{ k3s_etcd_election_timeout_ms }}"
+          etcd-snapshot-schedule-cron: "{{ k3s_etcd_snapshot_cron }}"
+          etcd-snapshot-retention: {{ k3s_etcd_snapshot_retention }}
+      register: k3s_etcd_tuning
+
     - name: Join {{ inventory_hostname }} as additional K3s HA control-plane server
       ansible.builtin.command:
         cmd: >
@@ -132,6 +157,29 @@
         INSTALL_K3S_VERSION: "{{ k3s_version }}"
       no_log: true
       when: not (k3s_server_unit.stat.exists and server_etcd_db.stat.exists)
+      register: k3s_join_install
+      # On the SD-card Raspberry Pi nodes the first start of a joining server (etcd member
+      # sync, API server start) can outlast the install script's "systemctl start", which then
+      # exits non-zero while systemd keeps starting k3s. The service state is checked below.
+      failed_when: false
+
+    - name: Wait until K3s server service is active on {{ inventory_hostname }} (slow on SD cards)
+      ansible.builtin.command:
+        cmd: systemctl is-active {{ k3s_server_service_name }}
+      register: joined_server_active
+      until: joined_server_active.stdout == "active"
+      retries: 60
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if K3s server did not become active on {{ inventory_hostname }}
+      ansible.builtin.fail:
+        msg: >-
+          k3s on {{ inventory_hostname }} is "{{ joined_server_active.stdout }}" after 10 minutes
+          (install script rc={{ k3s_join_install.rc | default('skipped') }}).
+          Check: journalctl -u {{ k3s_server_service_name }} -n 200 on {{ inventory_hostname }}.
+      when: joined_server_active.stdout != "active"
 
     - name: Ensure K3s server service is enabled and running on {{ inventory_hostname }}
       ansible.builtin.systemd:
@@ -139,6 +187,15 @@
         enabled: true
         state: started
       register: joined_server_systemd
+
+    - name: Restart K3s server on {{ inventory_hostname }} to apply the new etcd tuning
+      ansible.builtin.systemd:
+        name: "{{ k3s_server_service_name }}"
+        state: restarted
+      when:
+        - k3s_etcd_tuning.changed
+        - k3s_server_unit.stat.exists
+      register: joined_server_restart
 
     - name: Verify K3s server service is active on {{ inventory_hostname }}
       ansible.builtin.assert:

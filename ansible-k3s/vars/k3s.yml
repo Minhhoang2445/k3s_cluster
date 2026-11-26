@@ -104,6 +104,9 @@ monitoring_manifests_dir: "helm-chart/monitoring/manifests"
 monitoring_node: "{{ groups['k3s_workers'][0] }}"
 monitoring_grafana_admin_secret: "grafana-admin"
 monitoring_helm_timeout: "20m"
+# Playbook 07 deletes and recreates the Prometheus PVC (collected metrics are lost) when its
+# size differs from the one in helm-chart/monitoring/values.yaml, since a PVC cannot shrink.
+monitoring_prometheus_recreate_pvc_on_resize: true
 # K3s server config file used to enable etcd metrics (merged with CLI flags)
 k3s_config_file: "/etc/rancher/k3s/config.yaml"
 k3s_etcd_metrics_port: 2381

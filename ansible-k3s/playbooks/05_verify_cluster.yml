@@ -64,6 +64,24 @@
             fail_msg: "Local embedded etcd health check failed on {{ inventory_hostname }}: {{ local_etcd_health.stdout }}"
             success_msg: "Local embedded etcd on {{ inventory_hostname }} is healthy."
 
+        # k3s writes the effective etcd configuration (including etcd-arg) to db/etcd/config.
+        - name: Read the effective embedded etcd configuration
+          ansible.builtin.slurp:
+            src: "{{ k3s_etcd_db_dir }}/config"
+          register: etcd_effective_config
+
+        - name: Assert etcd runs with the tuned heartbeat and election timeout
+          ansible.builtin.assert:
+            that:
+              - (etcd_effective_config.content | b64decode | from_yaml)['heartbeat-interval'] | int == k3s_etcd_heartbeat_interval_ms | int
+              - (etcd_effective_config.content | b64decode | from_yaml)['election-timeout'] | int == k3s_etcd_election_timeout_ms | int
+            fail_msg: >-
+              etcd on {{ inventory_hostname }} does not use heartbeat-interval={{ k3s_etcd_heartbeat_interval_ms }}
+              and election-timeout={{ k3s_etcd_election_timeout_ms }}. Re-run playbook 02/03.
+            success_msg: >-
+              etcd on {{ inventory_hostname }}: heartbeat-interval={{ k3s_etcd_heartbeat_interval_ms }} ms,
+              election-timeout={{ k3s_etcd_election_timeout_ms }} ms.
+
     - name: Verify k3s-agent.service is active and k3s.service is absent on worker nodes
       ansible.builtin.assert:
         that:
@@ -117,19 +135,19 @@
             | map(attribute='metadata.name')
             | list
           }}
-# sua lai thanh 5 node khi deploy len raspberry
-    - name: Verify the cluster contains all 4 expected nodes (3 servers + 2 workers)
+    - name: Verify the cluster contains every inventory node ({{ groups['k3s_cluster'] | length }} nodes)
       ansible.builtin.assert:
         that:
-          - (k8s_nodes | length) == 4
+          - (k8s_nodes | length) == (groups['k3s_cluster'] | length)
           - (groups['k3s_servers'] | difference(discovered_node_names) | length) == 0
           - (groups['k3s_workers'] | difference(discovered_node_names) | length) == 0
         fail_msg: >-
-          Cluster node mismatch. Expected 4 nodes ({{ groups['k3s_cluster'] | join(', ') }}),
+          Cluster node mismatch. Expected {{ groups['k3s_cluster'] | length }} nodes
+          ({{ groups['k3s_cluster'] | join(', ') }}),
           found {{ k8s_nodes | length }}: {{ discovered_node_names | join(', ') }}.
-        success_msg: "All 4 expected nodes ({{ discovered_node_names | join(', ') }}) are registered in the cluster."
+        success_msg: "All {{ k8s_nodes | length }} expected nodes ({{ discovered_node_names | join(', ') }}) are registered in the cluster."
 
-    - name: Verify Ready status for each of the 3 HA server nodes and 2 worker nodes
+    - name: Verify Ready status for every cluster node
       ansible.builtin.assert:
         that:
           - >-
@@ -145,7 +163,7 @@
       loop_control:
         label: "{{ item.metadata.name }}"
 
-    - name: Verify all 3 server nodes have control-plane and etcd roles and annotations
+    - name: Verify every server node has control-plane and etcd roles and annotations
       ansible.builtin.assert:
         that:
           - "'node-role.kubernetes.io/control-plane' in item.metadata.labels"
@@ -187,37 +205,25 @@
       ansible.builtin.set_fact:
         etcd_members: "{{ (etcd_member_list_raw.stdout | from_json).members | default([]) }}"
 
-    - name: Verify all 3 K3s server nodes are active voting members in embedded etcd
+    - name: Build the expected etcd peer URLs from the server inventory
+      ansible.builtin.set_fact:
+        etcd_peer_urls: "{{ etcd_members | map(attribute='peerURLs') | flatten | list }}"
+        expected_etcd_peer_urls: >-
+          {{ groups['k3s_servers'] | map('extract', hostvars, 'ansible_host')
+             | map('regex_replace', '^', 'https://') | map('regex_replace', '$', ':2380') | list }}
+
+    - name: Verify every K3s server node is an active voting member of embedded etcd
       ansible.builtin.assert:
         that:
-          - (etcd_members | length) == 3
+          - (etcd_members | length) == (groups['k3s_servers'] | length)
           - (etcd_members | selectattr('isLearner', 'defined') | list | length) == 0
-          - >-
-            (
-              etcd_members
-              | map(attribute='peerURLs')
-              | flatten
-              | join(' ')
-            ) is search('192\.168\.64\.6:2380')
-          - >-
-            (
-              etcd_members
-              | map(attribute='peerURLs')
-              | flatten
-              | join(' ')
-            ) is search('192\.168\.64\.7:2380')
-          - >-
-            (
-              etcd_members
-              | map(attribute='peerURLs')
-              | flatten
-              | join(' ')
-            ) is search('192\.168\.64\.8:2380')
+          - (expected_etcd_peer_urls | difference(etcd_peer_urls) | length) == 0
         fail_msg: >-
-          Embedded etcd HA verification failed! Expected 3 voting etcd members across
-          192.168.64.6, 192.168.64.7, and 192.168.64.8, but found: {{ etcd_members }}.
+          Embedded etcd HA verification failed! Expected {{ groups['k3s_servers'] | length }} voting
+          members with peer URLs {{ expected_etcd_peer_urls }}, but found: {{ etcd_members }}.
         success_msg: >-
-          Embedded etcd HA quorum verified: 3 active voting members ({{ etcd_members | map(attribute='name') | join(', ') }}).
+          Embedded etcd HA quorum verified: {{ etcd_members | length }} active voting members
+          ({{ etcd_members | map(attribute='name') | join(', ') }}).
 
     - name: Display human-readable kubectl node table
       ansible.builtin.command:

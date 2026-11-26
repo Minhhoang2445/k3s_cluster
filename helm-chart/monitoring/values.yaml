@@ -39,7 +39,10 @@ prometheus:
     scrapeInterval: 30s
     evaluationInterval: 30s
     retention: 7d
-    retentionSize: 8GB
+    # The Raspberry Pi nodes have a ~14 GB SD card (~11 GB free after the OS) shared with
+    # images and a PostgreSQL instance. local-path does not enforce the PVC size, so
+    # retentionSize is the real cap: Prometheus deletes the oldest blocks above 3 GB.
+    retentionSize: 3GB
 
     # Pick up every ServiceMonitor/PodMonitor/PrometheusRule in the cluster
     # (Traefik, CloudNativePG, ...), not only the ones created by this chart.
@@ -63,7 +66,7 @@ prometheus:
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 10Gi
+              storage: 4Gi
 
 # ---------------------------------------------------------------- Alertmanager
 # Installed without receivers for now; notification channels are configured later.

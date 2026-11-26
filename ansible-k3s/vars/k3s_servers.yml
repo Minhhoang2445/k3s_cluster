@@ -19,3 +19,20 @@ k3s_server_required_tcp_ports:
   - 10250
 k3s_server_required_udp_ports:
   - 8472
+
+# ---------------------------------------------------------------- etcd tuning
+# Written to {{ k3s_etcd_config_file }} on every server (playbooks 02 and 03) and merged by
+# k3s with config.yaml and the CLI flags.
+#
+# The Raspberry Pi nodes keep etcd on an SD card (~80 ms per fsync, etcd expects < 10 ms).
+# With the defaults (heartbeat 100 ms, election timeout 1000 ms) a leader that is blocked on
+# the disk misses heartbeats and the followers elect a new leader although no node failed.
+# Larger values tolerate the slow disk; the cost is that a really failed leader is detected
+# after ~5 s instead of ~1 s. Rule of thumb: election timeout ~10x the heartbeat interval.
+# All servers must use the same values.
+k3s_etcd_config_file: "/etc/rancher/k3s/config.yaml.d/10-etcd-tuning.yaml"
+k3s_etcd_heartbeat_interval_ms: 500
+k3s_etcd_election_timeout_ms: 5000
+# Fewer snapshots than the default (every 12h is also the k3s default schedule; keep 3 instead of 5)
+k3s_etcd_snapshot_cron: "0 */12 * * *"
+k3s_etcd_snapshot_retention: 3

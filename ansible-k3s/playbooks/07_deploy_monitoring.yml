@@ -268,6 +268,9 @@
     monitoring_work_dir: "/home/{{ ansible_user }}/monitoring"
     monitoring_chart_dir: "{{ monitoring_work_dir }}/{{ monitoring_chart_name }}"
     prometheus_api: "/api/v1/namespaces/{{ monitoring_namespace }}/services/http:{{ monitoring_release_name }}-prometheus:9090/proxy/api/v1"
+    # Names created by the Prometheus Operator for the "monitoring" release
+    prometheus_pod_name: "prometheus-{{ monitoring_release_name }}-prometheus-0"
+    prometheus_pvc_name: "prometheus-{{ monitoring_release_name }}-prometheus-db-{{ prometheus_pod_name }}"
 
   tasks:
     - name: Validate Grafana admin password is loaded from Ansible Vault
@@ -352,6 +355,51 @@
       delay: 60
       until: monitoring_deploy_result.rc == 0
       changed_when: "'has been upgraded' in monitoring_deploy_result.stdout or 'has been installed' in monitoring_deploy_result.stdout"
+
+    # A PVC cannot shrink, and the StatefulSet keeps the existing PVC when the size in
+    # values.yaml changes. When they differ, delete the PVC and the Prometheus pod so the
+    # StatefulSet recreates the PVC with the new size. This drops the collected metrics
+    # (monitoring data only); set monitoring_prometheus_recreate_pvc_on_resize=false to keep them.
+    - name: Read the Prometheus PVC size requested in {{ monitoring_values_file }}
+      ansible.builtin.set_fact:
+        prometheus_pvc_wanted: >-
+          {{ (lookup('ansible.builtin.file', inventory_dir ~ '/../../' ~ monitoring_values_file) | from_yaml)
+             .prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage }}
+
+    - name: Read the size of the existing Prometheus PVC
+      ansible.builtin.command:
+        cmd: >-
+          {{ k3s_binary_path }} kubectl -n {{ monitoring_namespace }} get pvc {{ prometheus_pvc_name }}
+          --ignore-not-found -o jsonpath={.spec.resources.requests.storage}
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      register: prometheus_pvc_current
+      changed_when: false
+
+    - name: Recreate the Prometheus PVC with the new size ({{ prometheus_pvc_current.stdout }} -> {{ prometheus_pvc_wanted }})
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          K="{{ k3s_binary_path }} kubectl -n {{ monitoring_namespace }}"
+          # Wait until the operator has put the new size into the StatefulSet template,
+          # otherwise the recreated PVC would get the old size again.
+          for i in $(seq 1 36); do
+            size=$($K get statefulset {{ prometheus_pod_name | regex_replace('-0$', '') }} \
+              -o jsonpath='{.spec.volumeClaimTemplates[0].spec.resources.requests.storage}' || true)
+            [ "$size" = "{{ prometheus_pvc_wanted }}" ] && break
+            sleep 5
+          done
+          [ "$size" = "{{ prometheus_pvc_wanted }}" ] || { echo "StatefulSet still requests $size"; exit 1; }
+          $K delete pvc {{ prometheus_pvc_name }} --wait=false
+          $K delete pod {{ prometheus_pod_name }} --wait=true --timeout=180s
+          $K wait --for=delete pvc/{{ prometheus_pvc_name }} --timeout=180s || true
+      environment:
+        KUBECONFIG: "{{ k3s_kubeconfig_path }}"
+      when:
+        - monitoring_prometheus_recreate_pvc_on_resize | bool
+        - prometheus_pvc_current.stdout | length > 0
+        - prometheus_pvc_current.stdout != prometheus_pvc_wanted
+      changed_when: true
 
     # The Grafana HTTPRoute needs the Gateway API CRDs. site.yml runs this playbook before
     # Traefik (06), so install the pinned standard CRDs here if they are missing; the Traefik
