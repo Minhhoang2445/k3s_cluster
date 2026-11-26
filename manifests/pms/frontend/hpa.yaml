@@ -1,6 +1,8 @@
-# Scales frontend-deployment between 3 and 6 pods on CPU usage (metrics-server
+# Scales frontend-deployment between 3 and 4 pods on CPU usage (metrics-server
 # ships with k3s). Utilization = CPU used / CPU requests of the Deployment.
 # minReplicas 3 is the HA floor: the HPA never goes below it.
+# Target 70% of the 50m request = ~35m per pod. nginx only serves static files,
+# so 4 pods are enough.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -12,7 +14,7 @@ spec:
     kind: Deployment
     name: frontend-deployment
   minReplicas: 3
-  maxReplicas: 6
+  maxReplicas: 4
   metrics:
     - type: Resource
       resource:

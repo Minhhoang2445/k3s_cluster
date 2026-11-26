@@ -1,6 +1,10 @@
-# Scales backend-deployment between 3 and 6 pods on CPU usage (metrics-server
+# Scales backend-deployment between 3 and 8 pods on CPU usage (metrics-server
 # ships with k3s). Utilization = CPU used / CPU requests of the Deployment.
 # minReplicas 3 is the HA floor: the HPA never goes below it.
+# Target 70% of the 250m request = ~175m per pod: leaves ~30% headroom for the
+# 1-2 minutes a new pod needs to become Ready on the Raspberry Pi nodes.
+# maxReplicas 8 is bounded by PostgreSQL connections: Prisma opens cpus*2+1 = 9
+# connections per pod (4-core Pi), 8 x 9 = 72 < max_connections 100.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -12,7 +16,7 @@ spec:
     kind: Deployment
     name: backend-deployment
   minReplicas: 3
-  maxReplicas: 6
+  maxReplicas: 8
   metrics:
     - type: Resource
       resource:

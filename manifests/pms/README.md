@@ -50,7 +50,7 @@ Client ─▶ HAProxy (Mac) ─▶ node:80 ─▶ Traefik (3 pod trên 3 master)
 
 | Cơ chế | Nằm ở | Tác dụng |
 |---|---|---|
-| HPA (min 3, max 6) | `hpa.yaml` | Luôn có ít nhất 3 bản sao, tự tăng khi CPU vượt 70% |
+| HPA (min 3; max 8 backend, 4 frontend) | `hpa.yaml` | Luôn có ít nhất 3 bản sao, tự tăng khi CPU vượt 70% của `requests` |
 | Không khai báo `replicas` | `deployment.yaml` | Số pod do HPA quản lý; ArgoCD không kéo số pod về giá trị cố định |
 | `topologySpreadConstraints` | `deployment.yaml` | Rải pod đều trên các node, nên một node chết chỉ mất một phần pod |
 | Probes startup/readiness/liveness | `deployment.yaml` | Không gửi traffic tới pod chưa sẵn sàng; tự khởi động lại pod bị treo |

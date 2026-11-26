@@ -5,7 +5,7 @@ metadata:
   name: frontend-deployment
   namespace: project-management-system
 spec:
-  # No "replicas" field: the pod count is owned by frontend-hpa (3-6 pods).
+  # No "replicas" field: the pod count is owned by frontend-hpa (3-4 pods).
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -70,7 +70,7 @@ spec:
             failureThreshold: 3
           resources:
             limits:
-              memory: 64Mi
+              memory: 128Mi
             requests:
-              cpu: 20m
+              cpu: 50m
               memory: 32Mi

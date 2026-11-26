@@ -5,8 +5,7 @@ metadata:
   name: backend-deployment
   namespace: project-management-system
 spec:
-  # No "replicas" field: the pod count is owned by backend-hpa (3-6 pods).
-  # Setting it here would make ArgoCD (selfHeal) reset it and fight the HPA.
+  # No "replicas" field: the pod count is owned by backend-hpa (3-8 pods).
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -107,10 +106,12 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
           # requests: used by the scheduler and by the HPA (% CPU).
+          # 250m is close to what one backend pod uses under moderate load on a Raspberry Pi 4
+          # (Node.js event loop + Prisma query engine), so the HPA percentage reflects real load.
           # Memory limit only: no CPU limit, to avoid CPU throttling.
           resources:
             limits:
-              memory: 384Mi
+              memory: 512Mi
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 250m
+              memory: 192Mi
